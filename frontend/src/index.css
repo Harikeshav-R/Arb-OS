@@ -118,3 +118,11 @@
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }
+
+/* Smooth progress bar - uses --progress-fill from inline style */
+.progress-step::-webkit-progress-value {
+  background: var(--progress-fill, hsl(var(--primary)));
+}
+.progress-step::-moz-progress-bar {
+  background: var(--progress-fill, hsl(var(--primary)));
+}
