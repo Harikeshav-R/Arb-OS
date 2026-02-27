@@ -30,13 +30,20 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
+          python-version: "3.13"
       - name: Install dependencies
         working-directory: services/brain
-        run: uv sync
+        run: uv sync --all-extras
       - name: Lint with Ruff
         working-directory: services/brain
         run: uv run ruff check .
+      - name: Run tests
+        working-directory: services/brain
+        run: uv run python -m pytest tests/ -v
+        env:
+          WATSONX_APIKEY: test
+          WATSONX_PROJECT_ID: test
+          DATABASE_URL: postgresql://postgres:password@localhost:5432/arbos
 
   frontend-check:
     runs-on: ubuntu-latest
