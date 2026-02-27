@@ -487,7 +487,7 @@ async def graph_stats():
 
 # ── Graph Sync Endpoint ────────────────────────────────────────────────────────
 
-@app.get("/state", response_model=BrainStatePayload)
+@app.get("/state", response_model=BrainStatePayload, dependencies=[Depends(_verify_admin)])
 async def get_brain_state(session: AsyncSession = Depends(get_session)):
     """Return the entire synchronized graph state for the Rust Engine to poll."""
 

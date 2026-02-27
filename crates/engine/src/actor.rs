@@ -529,7 +529,7 @@ impl EngineActor {
         .await;
     }
 
-    fn get_partition_bids(&self, partition_id: &String) -> Option<Vec<(U256, Decimal)>> {
+    fn get_partition_bids(&self, partition_id: &str) -> Option<Vec<(U256, Decimal)>> {
         let outcome_assets = self.market_outcomes.get(partition_id)?;
         let mut bids = Vec::new();
 
@@ -550,7 +550,7 @@ impl EngineActor {
 
     fn is_partition_exhaustively_tradable(
         &self,
-        partition_id: &String,
+        partition_id: &str,
         bids: &[(U256, Decimal)],
     ) -> bool {
         // Enforce strict exhaustiveness: Are we receiving the EXACT number of outcomes for this partition?
@@ -790,9 +790,12 @@ impl EngineActor {
             return Err(anyhow::anyhow!("BRAIN_API_URL must have a valid host"));
         }
 
+        let brain_api_key = std::env::var("BRAIN_API_KEY").unwrap_or_else(|_| "".to_string());
+
         let res = self
             .api_client
             .get(valid_brain_url.join("state")?)
+            .header("X-API-Key", brain_api_key)
             .send()
             .await?;
 
