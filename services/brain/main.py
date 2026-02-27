@@ -7,11 +7,12 @@ orchestrated by a LangGraph StateGraph.
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-
 from typing import Any
+
 from fastapi import Depends, FastAPI, HTTPException, Query, Security
 from fastapi.security import APIKeyHeader
 from loguru import logger
@@ -557,7 +558,6 @@ async def get_brain_state(session: AsyncSession = Depends(get_session)):
             me_confidences[f"{c1}|{c2}"] = rel["confidence"]
             me_confidences[f"{c2}|{c1}"] = rel["confidence"]
 
-    import hashlib
     for i, group in enumerate(partitions_lists):
         if len(group) >= 2:
             group_tokens = []

@@ -13,7 +13,6 @@ use arbos_core::constants::{
 };
 
 use serde::Deserialize;
-use std::str::FromStr;
 
 #[derive(Debug, Deserialize)]
 pub struct BrainStatePayload {
@@ -57,10 +56,13 @@ pub struct EngineActor {
     pub contradiction_edges: HashMap<U256, Vec<(U256, Decimal)>>, // Peer -> (Peer ID, Default Weight 1.0)
 
     // Map of Market (Condition) -> Set of Asset IDs (Outcomes)
-    pub market_outcomes: HashMap<polymarket_client_sdk::types::B256, HashSet<U256>>,
+    pub market_outcomes: HashMap<String, HashSet<U256>>,
+
+    // Map of Asset ID -> Partition ID (for O(1) partition lookups)
+    pub asset_to_partition: HashMap<U256, String>,
 
     // Map of Market (Condition) -> Required Number of Outcomes for Exhaustiveness
-    pub market_expected_outcome_counts: HashMap<polymarket_client_sdk::types::B256, usize>,
+    pub market_expected_outcome_counts: HashMap<String, usize>,
 
     // Map of Asset ID -> Resolution Deadline (Timestamp in seconds)
     pub market_end_timestamps: HashMap<U256, i64>,
@@ -74,6 +76,12 @@ pub struct EngineActor {
     // Reusable HTTP Client for API calls
     pub api_client: reqwest::Client,
 }
+
+pub type PartitionParseResult = (
+    HashMap<String, HashSet<U256>>,
+    HashMap<U256, String>,
+    HashMap<String, usize>,
+);
 
 impl Default for EngineActor {
     fn default() -> Self {
@@ -94,6 +102,7 @@ impl EngineActor {
             implication_reverse_edges: HashMap::new(),
             contradiction_edges: HashMap::new(),
             market_outcomes: HashMap::new(),
+            asset_to_partition: HashMap::new(),
             market_expected_outcome_counts: HashMap::new(),
             market_end_timestamps: HashMap::new(),
             tracked_assets: HashSet::new(),
@@ -493,19 +502,24 @@ impl EngineActor {
         fee_rate: Decimal,
         gas_per_leg_usdc: Decimal,
     ) {
-        let condition_id = book.market;
+        let asset_id = book.asset_id;
 
-        let bids = match self.get_partition_bids(&condition_id) {
+        let partition_id = match self.asset_to_partition.get(&asset_id) {
+            Some(pid) => pid.clone(),
+            None => return,
+        };
+
+        let bids = match self.get_partition_bids(&partition_id) {
             Some(b) => b,
             None => return,
         };
 
-        if !self.is_partition_exhaustively_tradable(&condition_id, &bids) {
+        if !self.is_partition_exhaustively_tradable(&partition_id, &bids) {
             return;
         }
 
         self.check_and_send_partition(
-            condition_id,
+            partition_id,
             bids,
             book.timestamp,
             bot_tx,
@@ -515,11 +529,8 @@ impl EngineActor {
         .await;
     }
 
-    fn get_partition_bids(
-        &self,
-        condition_id: &polymarket_client_sdk::types::B256,
-    ) -> Option<Vec<(U256, Decimal)>> {
-        let outcome_assets = self.market_outcomes.get(condition_id)?;
+    fn get_partition_bids(&self, partition_id: &String) -> Option<Vec<(U256, Decimal)>> {
+        let outcome_assets = self.market_outcomes.get(partition_id)?;
         let mut bids = Vec::new();
 
         for asset in outcome_assets {
@@ -539,13 +550,13 @@ impl EngineActor {
 
     fn is_partition_exhaustively_tradable(
         &self,
-        condition_id: &polymarket_client_sdk::types::B256,
+        partition_id: &String,
         bids: &[(U256, Decimal)],
     ) -> bool {
         // Enforce strict exhaustiveness: Are we receiving the EXACT number of outcomes for this partition?
         let required_outcome_count = self
             .market_expected_outcome_counts
-            .get(condition_id)
+            .get(partition_id)
             .copied()
             .unwrap_or(0);
 
@@ -559,7 +570,7 @@ impl EngineActor {
 
     async fn check_and_send_partition(
         &mut self,
-        condition_id: polymarket_client_sdk::types::B256,
+        partition_id: String,
         bids: Vec<(U256, Decimal)>,
         timestamp: i64,
         bot_tx: &Sender<ArbSignal>,
@@ -592,7 +603,7 @@ impl EngineActor {
                 timestamp,
             };
 
-            info!(market = ?condition_id, leg_count = bids.len(), profit = %profit, "Routing Partition ArbSignal to Bot");
+            info!(partition_id = %partition_id, leg_count = bids.len(), profit = %profit, "Routing Partition ArbSignal to Bot");
             if let Err(e) = bot_tx.send(signal).await {
                 error!("Failed to route Partition ArbSignal to Bot channel: {}", e);
             }
@@ -613,12 +624,19 @@ impl EngineActor {
     ) {
         let asset_id = book.asset_id;
 
-        let peers = match self.contradiction_edges.get(&asset_id) {
-            Some(p) => p.clone(),
+        let peers_len = match self.contradiction_edges.get(&asset_id) {
+            Some(p) => p.len(),
             None => return,
         };
 
-        for (peer_id, weight) in peers {
+        let mut executed_peer = None;
+
+        for i in 0..peers_len {
+            let (peer_id, weight) = {
+                let peers = self.contradiction_edges.get(&asset_id).unwrap();
+                peers[i]
+            };
+
             let peer_book = match self.orderbook_cache.get(&peer_id) {
                 Some(b) => b,
                 None => continue,
@@ -684,14 +702,18 @@ impl EngineActor {
                     );
                 }
 
-                // Eject executed legs
-                self.orderbook_cache.remove(&asset_id);
-                self.orderbook_cache.remove(&peer_id);
+                // Defer ejection
+                executed_peer = Some(peer_id);
 
                 // Break after executing one contradiction for this asset to avoid double-spend
                 // on the same loop tick if it contradicts multiple peers
                 break;
             }
+        }
+
+        if let Some(peer_id) = executed_peer {
+            self.orderbook_cache.remove(&asset_id);
+            self.orderbook_cache.remove(&peer_id);
         }
     }
 
@@ -724,7 +746,7 @@ impl EngineActor {
 
         // 1. Parse Graph Edges
         let (new_imp_edges, new_imp_rev) = Self::parse_implications(&payload.implications);
-        let (new_market_outcomes, new_market_expected) =
+        let (new_market_outcomes, new_asset_to_partition, new_market_expected) =
             Self::parse_partitions(&payload.partitions);
         let new_contradictions = Self::parse_contradictions(&payload.contradictions);
         let new_timestamps = Self::parse_timestamps(&payload.asset_end_timestamps);
@@ -746,6 +768,7 @@ impl EngineActor {
         self.implication_reverse_edges = new_imp_rev;
         self.contradiction_edges = new_contradictions;
         self.market_outcomes = new_market_outcomes;
+        self.asset_to_partition = new_asset_to_partition;
         self.market_expected_outcome_counts = new_market_expected;
         self.market_end_timestamps = new_timestamps;
 
@@ -841,48 +864,37 @@ impl EngineActor {
         edges
     }
 
-    fn parse_partitions(
-        partitions: &[crate::actor::PartitionMapping],
-    ) -> (
-        HashMap<polymarket_client_sdk::types::B256, HashSet<U256>>,
-        HashMap<polymarket_client_sdk::types::B256, usize>,
-    ) {
+    fn parse_partitions(partitions: &[crate::actor::PartitionMapping]) -> PartitionParseResult {
         let mut outcomes = HashMap::new();
+        let mut asset_to_partition = HashMap::new();
         let mut expected = HashMap::new();
 
         for part in partitions {
             if part.confidence < MIN_CONFIDENCE_THRESHOLD {
                 continue;
             }
-            match polymarket_client_sdk::types::B256::from_str(&part.condition_id) {
-                Ok(cond_id) => {
-                    expected.insert(cond_id, part.expected_outcomes_count);
 
-                    let mut asset_set = HashSet::new();
-                    for a_str in &part.assets {
-                        match U256::from_str_radix(a_str, 10) {
-                            Ok(a_id) => {
-                                asset_set.insert(a_id);
-                            }
-                            Err(_) => {
-                                warn!(
-                                    "Failed to parse Partition Asset U256 ID, dropping asset: {}",
-                                    a_str
-                                );
-                            }
-                        }
+            let partition_id = part.condition_id.clone();
+            expected.insert(partition_id.clone(), part.expected_outcomes_count);
+
+            let mut asset_set = HashSet::new();
+            for a_str in &part.assets {
+                match U256::from_str_radix(a_str, 10) {
+                    Ok(a_id) => {
+                        asset_set.insert(a_id);
+                        asset_to_partition.insert(a_id, partition_id.clone());
                     }
-                    outcomes.insert(cond_id, asset_set);
-                }
-                Err(_) => {
-                    warn!(
-                        "Failed to parse Partition Condition B256 ID, dropping partition: {}",
-                        part.condition_id
-                    );
+                    Err(_) => {
+                        warn!(
+                            "Failed to parse Partition Asset U256 ID, dropping asset: {}",
+                            a_str
+                        );
+                    }
                 }
             }
+            outcomes.insert(partition_id, asset_set);
         }
-        (outcomes, expected)
+        (outcomes, asset_to_partition, expected)
     }
 
     fn parse_timestamps(asset_end_timestamps: &HashMap<String, i64>) -> HashMap<U256, i64> {
@@ -898,7 +910,7 @@ impl EngineActor {
     fn compute_tracked_assets(
         edges: &HashMap<U256, Vec<U256>>,
         contradictions: &HashMap<U256, Vec<(U256, Decimal)>>,
-        outcomes: &HashMap<polymarket_client_sdk::types::B256, HashSet<U256>>,
+        outcomes: &HashMap<String, HashSet<U256>>,
         timestamps: &HashMap<U256, i64>,
     ) -> HashSet<U256> {
         let current_ts = std::time::SystemTime::now()
@@ -968,7 +980,7 @@ impl EngineActor {
 
     fn tally_outcome_frequencies(
         frequency: &mut HashMap<U256, usize>,
-        outcomes: &HashMap<polymarket_client_sdk::types::B256, HashSet<U256>>,
+        outcomes: &HashMap<String, HashSet<U256>>,
         timestamps: &HashMap<U256, i64>,
         current_ts: i64,
     ) {
