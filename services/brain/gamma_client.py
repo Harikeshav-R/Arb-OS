@@ -116,8 +116,8 @@ class GammaClient:
         response = await self._client.get(url, params=params)
 
         if response.status_code == 429:
-                logger.bind(url=url).warning("gamma_rate_limited")
-                raise GammaClientError("Gamma API rate limit exceeded (HTTP 429)")
+            logger.bind(url=url).warning("gamma_rate_limited")
+            raise GammaClientError("Gamma API rate limit exceeded (HTTP 429)")
 
         response.raise_for_status()
         data = response.json()

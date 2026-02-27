@@ -205,8 +205,10 @@ async def persist_result(state: AnalysisState, *, session: AsyncSession) -> dict
 
     # Determine canonical parent/child ordering based on direction
     direction = rel_data["direction"]
+    persisted_direction = direction
     if direction == "B_TO_A":
         parent_cid, child_cid = cid_b, cid_a
+        persisted_direction = "A_TO_B"
     elif direction == "NONE":
         # Canonicalize undirected relationships so (A, B) and (B, A) are treated the same
         parent_cid, child_cid = sorted([cid_a, cid_b])
@@ -226,7 +228,7 @@ async def persist_result(state: AnalysisState, *, session: AsyncSession) -> dict
 
     if existing:
         existing.logic_type = relation
-        existing.direction = direction
+        existing.direction = persisted_direction
         existing.confidence = rel_data["confidence"]
         existing.reasoning = rel_data["reasoning"]
         existing.is_active = True
@@ -237,7 +239,7 @@ async def persist_result(state: AnalysisState, *, session: AsyncSession) -> dict
             parent_condition_id=parent_cid,
             child_condition_id=child_cid,
             logic_type=relation,
-            direction=direction,
+            direction=persisted_direction,
             confidence=rel_data["confidence"],
             reasoning=rel_data["reasoning"],
             is_active=True,

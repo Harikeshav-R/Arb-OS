@@ -144,7 +144,7 @@ async def health(session: AsyncSession = Depends(get_session)):
 # ── Market Sync ───────────────────────────────────────────────────────────────
 
 
-@app.post("/markets/sync", response_model=dict)
+@app.post("/markets/sync", response_model=dict, dependencies=[Depends(_verify_admin)])
 async def sync_markets(session: AsyncSession = Depends(get_session)):
     """Fetch active markets from the Gamma API and upsert into the local DB."""
     if _gamma_client is None:
