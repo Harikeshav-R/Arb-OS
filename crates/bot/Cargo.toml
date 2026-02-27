@@ -1,0 +1,10 @@
+[package]
+name = "arbos-bot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arbos-core = { path = "../core" }
+arbos-engine = { path = "../engine" }
+tokio = { workspace = true }
+polymarket-client-sdk = { workspace = true }
