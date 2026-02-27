@@ -8,7 +8,7 @@ impl ContradictionStrategy {
     /// Checks for a Contradiction arbitrage signal where two mutually exclusive events
     /// have a combined probability > 1.0.
     /// Calculates coherent probabilities using weights to penalize the probabilities,
-    /// and logs the "edges".
+    /// and logs the "delta_to_coherent".
     /// If Sum(P_bid) > 1.0 + fees + gas, we sell both outcomes (buy NO on both).
     #[allow(clippy::too_many_arguments)]
     pub fn check(
@@ -49,8 +49,8 @@ impl ContradictionStrategy {
             coherent_b -= half_excess;
         }
 
-        let edge_a = coherent_a - prob_a_bid;
-        let edge_b = coherent_b - prob_b_bid;
+        let delta_to_coherent_a = prob_a_bid - coherent_a;
+        let delta_to_coherent_b = prob_b_bid - coherent_b;
 
         let gross_profit_per_share = excess;
 
@@ -75,8 +75,8 @@ impl ContradictionStrategy {
                 weight_b = %weight_b,
                 coherent_a = %coherent_a,
                 coherent_b = %coherent_b,
-                edge_a = %edge_a,
-                edge_b = %edge_b,
+                delta_to_coherent_a = %delta_to_coherent_a,
+                delta_to_coherent_b = %delta_to_coherent_b,
                 net_profit = %expected_net_profit,
                 "Contradiction Arbitrage Triggered!"
             );
@@ -85,8 +85,8 @@ impl ContradictionStrategy {
             debug!(
                 sum_bids = %sum_bids,
                 excess = %excess,
-                edge_a = %edge_a,
-                edge_b = %edge_b,
+                delta_to_coherent_a = %delta_to_coherent_a,
+                delta_to_coherent_b = %delta_to_coherent_b,
                 gross = %total_gross_profit,
                 fees = %total_fees,
                 gas = %estimated_gas_usdc,
