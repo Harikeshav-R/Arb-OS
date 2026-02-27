@@ -1,0 +1,18 @@
+[package]
+name = "arbos-ingestor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arbos-core = { path = "../core" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+polymarket-client-sdk = { workspace = true, features = ["ws", "clob"] }
+futures = "0.3.32"
+anyhow = "1.0.102"
+rust_decimal = { version = "1.40.0", features = ["macros"] }
+rust_decimal_macros = "1.40.0"
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
