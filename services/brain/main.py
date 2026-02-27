@@ -11,7 +11,9 @@ import sys
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from typing import Any
+from fastapi import Depends, FastAPI, HTTPException, Query, Security
+from fastapi.security import APIKeyHeader
 from loguru import logger
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,6 +49,34 @@ logger.add(
 
 _graph_manager = RelationshipGraphManager()
 _gamma_client: GammaClient | None = None
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def _verify_admin(api_key: str = Security(_api_key_header)) -> None:
+    """Verify the admin API key for protected endpoints."""
+    settings = get_settings()
+    if not settings.admin_api_key:
+        return  # Auth disabled if no admin key is configured
+
+    if api_key != settings.admin_api_key.get_secret_value():
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing X-API-Key header",
+        )
+
+
+def _parse_bool(val: Any, default: bool) -> bool:
+    """Parse a boolean carefully to avoid 'false' string turning into True."""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        val_lower = val.lower()
+        if val_lower in ("true", "1", "yes"):
+            return True
+        if val_lower in ("false", "0", "no"):
+            return False
+    # Fallback for None or unrecognized strings/ints
+    return bool(val) if val is not None else default
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -155,9 +185,9 @@ async def sync_markets(session: AsyncSession = Depends(get_session)):
             "question_id": raw.get("questionID") or raw.get("question_id"),
             "description": raw.get("description"),
             "slug": raw.get("slug"),
-            "neg_risk": bool(raw.get("negRisk", False)),
-            "active": bool(raw.get("active", True)),
-            "closed": bool(raw.get("closed", False)),
+            "neg_risk": _parse_bool(raw.get("negRisk"), False),
+            "active": _parse_bool(raw.get("active"), True),
+            "closed": _parse_bool(raw.get("closed"), False),
             "volume": float(raw.get("volume", 0) or 0),
             "end_date": raw.get("endDate") or raw.get("end_date"),
             "event_id": raw.get("eventId") or raw.get("event_id"),
@@ -256,7 +286,7 @@ async def analyze_pair(
 # ── Scan ──────────────────────────────────────────────────────────────────────
 
 
-@app.post("/scan", response_model=dict)
+@app.post("/scan", response_model=dict, dependencies=[Depends(_verify_admin)])
 async def scan_markets(
         limit: int = Query(default=20, le=100, description="Max markets to compare"),
         session: AsyncSession = Depends(get_session),
@@ -285,9 +315,14 @@ async def scan_markets(
 
     for i, market_a in enumerate(markets):
         for market_b in markets[i + 1:]:
-            # Skip already-analyzed pairs
+            # Skip already-analyzed pairs (even if inactive right now, unless we want
+            # to re-scan them)
+            # PR Comment asked:
+            # "If inactive relationships should be reprocessed, add
+            # Relationship.is_active.is_(True) to this query."
             existing = await session.execute(
                 select(Relationship).where(
+                    Relationship.is_active.is_(True),
                     (
                             (Relationship.parent_condition_id == market_a.condition_id)
                             & (Relationship.child_condition_id == market_b.condition_id)

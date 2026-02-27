@@ -21,6 +21,9 @@ class BrainSettings(BaseSettings):
     watsonx_project_id: str
     watsonx_model_id: str = "mistralai/mistral-large"
 
+    # ── Security ──────────────────────────────────────────────────────────────
+    admin_api_key: SecretStr | None = None
+
     # ── LLM tuning ────────────────────────────────────────────────────────────
     brain_llm_temperature: float = 0.0
     brain_llm_max_tokens: int = 1024
