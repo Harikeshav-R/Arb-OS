@@ -13,12 +13,12 @@ use arbos_core::constants::{
 };
 
 use serde::Deserialize;
-use std::str::FromStr;
 
 #[derive(Debug, Deserialize)]
 pub struct BrainStatePayload {
     pub implications: Vec<ImplicationMapping>,
     pub partitions: Vec<PartitionMapping>,
+    pub contradictions: Vec<ContradictionMapping>,
     pub asset_end_timestamps: HashMap<String, i64>,
 }
 
@@ -37,6 +37,13 @@ pub struct PartitionMapping {
     pub confidence: f64,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ContradictionMapping {
+    pub asset_a: String,
+    pub asset_b: String,
+    pub confidence: f64,
+}
+
 pub struct EngineActor {
     // State Caches
     pub orderbook_cache: HashMap<U256, NormalizedOrderbook>,
@@ -45,11 +52,17 @@ pub struct EngineActor {
     // Map of relation edges: Child -> List of Parents that imply it
     pub implication_reverse_edges: HashMap<U256, Vec<U256>>,
 
-    // Map of Market (Condition) -> Set of Asset IDs (Outcomes)
-    pub market_outcomes: HashMap<polymarket_client_sdk::types::B256, HashSet<U256>>,
+    // Map of undirected contradicting mutually-exclusive peers (A implies NOT B, etc.)
+    pub contradiction_edges: HashMap<U256, Vec<(U256, Decimal)>>, // Peer -> (Peer ID, Default Weight 1.0)
 
-    // Map of Market (Condition) -> Required Number of Outcomes for Exhaustiveness
-    pub market_expected_outcome_counts: HashMap<polymarket_client_sdk::types::B256, usize>,
+    // Map of Partition ID -> Set of Asset IDs (Outcomes)
+    pub partition_outcomes: HashMap<String, HashSet<U256>>,
+
+    // Map of Asset ID -> Partition ID (for O(1) partition lookups)
+    pub asset_to_partition: HashMap<U256, String>,
+
+    // Map of Partition ID -> Required Number of Outcomes for Exhaustiveness
+    pub partition_expected_outcome_counts: HashMap<String, usize>,
 
     // Map of Asset ID -> Resolution Deadline (Timestamp in seconds)
     pub market_end_timestamps: HashMap<U256, i64>,
@@ -63,6 +76,12 @@ pub struct EngineActor {
     // Reusable HTTP Client for API calls
     pub api_client: reqwest::Client,
 }
+
+pub type PartitionParseResult = (
+    HashMap<String, HashSet<U256>>,
+    HashMap<U256, String>,
+    HashMap<String, usize>,
+);
 
 impl Default for EngineActor {
     fn default() -> Self {
@@ -81,8 +100,10 @@ impl EngineActor {
             orderbook_cache: HashMap::new(),
             implication_edges: HashMap::new(),
             implication_reverse_edges: HashMap::new(),
-            market_outcomes: HashMap::new(),
-            market_expected_outcome_counts: HashMap::new(),
+            contradiction_edges: HashMap::new(),
+            partition_outcomes: HashMap::new(),
+            asset_to_partition: HashMap::new(),
+            partition_expected_outcome_counts: HashMap::new(),
             market_end_timestamps: HashMap::new(),
             tracked_assets: HashSet::new(),
             current_gas_usdc_per_leg: (ESTIMATED_GAS_UNITS_PER_LEG * ESTIMATED_GWEI_PRICE)
@@ -175,6 +196,8 @@ impl EngineActor {
         self.evaluate_implications(&book, bot_tx, fee_rate, gas_per_leg_usdc)
             .await;
         self.evaluate_partitions(&book, bot_tx, fee_rate, gas_per_leg_usdc)
+            .await;
+        self.evaluate_contradictions(&book, bot_tx, fee_rate, gas_per_leg_usdc)
             .await;
     }
 
@@ -479,19 +502,24 @@ impl EngineActor {
         fee_rate: Decimal,
         gas_per_leg_usdc: Decimal,
     ) {
-        let condition_id = book.market;
+        let asset_id = book.asset_id;
 
-        let bids = match self.get_partition_bids(&condition_id) {
+        let partition_id = match self.asset_to_partition.get(&asset_id) {
+            Some(pid) => pid.clone(),
+            None => return,
+        };
+
+        let bids = match self.get_partition_bids(&partition_id) {
             Some(b) => b,
             None => return,
         };
 
-        if !self.is_partition_exhaustively_tradable(&condition_id, &bids) {
+        if !self.is_partition_exhaustively_tradable(&partition_id, &bids) {
             return;
         }
 
         self.check_and_send_partition(
-            condition_id,
+            partition_id,
             bids,
             book.timestamp,
             bot_tx,
@@ -501,11 +529,8 @@ impl EngineActor {
         .await;
     }
 
-    fn get_partition_bids(
-        &self,
-        condition_id: &polymarket_client_sdk::types::B256,
-    ) -> Option<Vec<(U256, Decimal)>> {
-        let outcome_assets = self.market_outcomes.get(condition_id)?;
+    fn get_partition_bids(&self, partition_id: &str) -> Option<Vec<(U256, Decimal)>> {
+        let outcome_assets = self.partition_outcomes.get(partition_id)?;
         let mut bids = Vec::new();
 
         for asset in outcome_assets {
@@ -525,13 +550,13 @@ impl EngineActor {
 
     fn is_partition_exhaustively_tradable(
         &self,
-        condition_id: &polymarket_client_sdk::types::B256,
+        partition_id: &str,
         bids: &[(U256, Decimal)],
     ) -> bool {
         // Enforce strict exhaustiveness: Are we receiving the EXACT number of outcomes for this partition?
         let required_outcome_count = self
-            .market_expected_outcome_counts
-            .get(condition_id)
+            .partition_expected_outcome_counts
+            .get(partition_id)
             .copied()
             .unwrap_or(0);
 
@@ -545,7 +570,7 @@ impl EngineActor {
 
     async fn check_and_send_partition(
         &mut self,
-        condition_id: polymarket_client_sdk::types::B256,
+        partition_id: String,
         bids: Vec<(U256, Decimal)>,
         timestamp: i64,
         bot_tx: &Sender<ArbSignal>,
@@ -578,7 +603,7 @@ impl EngineActor {
                 timestamp,
             };
 
-            info!(market = ?condition_id, leg_count = bids.len(), profit = %profit, "Routing Partition ArbSignal to Bot");
+            info!(partition_id = %partition_id, leg_count = bids.len(), profit = %profit, "Routing Partition ArbSignal to Bot");
             if let Err(e) = bot_tx.send(signal).await {
                 error!("Failed to route Partition ArbSignal to Bot channel: {}", e);
             }
@@ -587,6 +612,108 @@ impl EngineActor {
             for (asset, _) in bids {
                 self.orderbook_cache.remove(&asset);
             }
+        }
+    }
+
+    async fn evaluate_contradictions(
+        &mut self,
+        book: &NormalizedOrderbook,
+        bot_tx: &Sender<ArbSignal>,
+        fee_rate: Decimal,
+        gas_per_leg_usdc: Decimal,
+    ) {
+        let asset_id = book.asset_id;
+
+        let peers_len = match self.contradiction_edges.get(&asset_id) {
+            Some(p) => p.len(),
+            None => return,
+        };
+
+        let mut executed_peer = None;
+
+        for i in 0..peers_len {
+            let (peer_id, weight) = {
+                let peers = self.contradiction_edges.get(&asset_id).unwrap();
+                peers[i]
+            };
+
+            let peer_book = match self.orderbook_cache.get(&peer_id) {
+                Some(b) => b,
+                None => continue,
+            };
+
+            if book.bid_untradeable || peer_book.bid_untradeable {
+                continue;
+            }
+
+            let bid_a = book.vwap_bid;
+            let bid_b = peer_book.vwap_bid;
+
+            if bid_a <= Decimal::ZERO || bid_b <= Decimal::ZERO {
+                continue;
+            }
+
+            // A Contradiction strategy also executes exactly 2 legs (Sell A, Sell B)
+            let total_est_gas_usdc = gas_per_leg_usdc * Decimal::from(2);
+
+            // Weight logic: for binary markets, usually 1.0 vs 1.0. The tier 2 brain assigns 1.0 for mutually exclusive currently.
+            let weight_a = Decimal::ONE;
+            let weight_b = weight;
+
+            if let Some(profit) = crate::strategies::contradiction::ContradictionStrategy::check(
+                asset_id,
+                bid_a,
+                weight_a,
+                peer_id,
+                bid_b,
+                weight_b,
+                fee_rate,
+                total_est_gas_usdc,
+            ) {
+                // Sizing follows logic from strategy: TARGET_LIQUIDITY / sum_bids
+                let sum_bids = bid_a + bid_b;
+                let consistent_size_shares = arbos_core::constants::TARGET_LIQUIDITY / sum_bids;
+
+                let signal = ArbSignal {
+                    legs: vec![
+                        TradeAction::Sell {
+                            asset_id,
+                            size: consistent_size_shares,
+                        },
+                        TradeAction::Sell {
+                            asset_id: peer_id,
+                            size: consistent_size_shares,
+                        },
+                    ],
+                    expected_profit_usdc: profit,
+                    timestamp: book.timestamp,
+                };
+
+                info!(
+                    asset_a = %asset_id,
+                    asset_b = %peer_id,
+                    profit = %profit,
+                    "Routing Contradiction ArbSignal to Bot"
+                );
+                if let Err(e) = bot_tx.send(signal).await {
+                    error!(
+                        "Failed to route Contradiction ArbSignal to Bot channel: {}",
+                        e
+                    );
+                }
+
+                // Defer ejection
+                executed_peer = Some(peer_id);
+
+                // Break after executing one contradiction for this asset to avoid double-spend
+                // on the same loop tick if it contradicts multiple peers
+                break;
+            }
+        }
+
+        if let Some(peer_id) = executed_peer {
+            self.orderbook_cache.remove(&asset_id);
+            self.orderbook_cache.remove(&peer_id);
         }
     }
 
@@ -619,13 +746,18 @@ impl EngineActor {
 
         // 1. Parse Graph Edges
         let (new_imp_edges, new_imp_rev) = Self::parse_implications(&payload.implications);
-        let (new_market_outcomes, new_market_expected) =
+        let (new_partition_outcomes, new_asset_to_partition, new_partition_expected) =
             Self::parse_partitions(&payload.partitions);
+        let new_contradictions = Self::parse_contradictions(&payload.contradictions);
         let new_timestamps = Self::parse_timestamps(&payload.asset_end_timestamps);
 
         // 2. Compute Tracked Assets (with Expiry GC and MAX_TRACKED limits)
-        let new_tracked_assets =
-            Self::compute_tracked_assets(&new_imp_edges, &new_market_outcomes, &new_timestamps);
+        let new_tracked_assets = Self::compute_tracked_assets(
+            &new_imp_edges,
+            &new_contradictions,
+            &new_partition_outcomes,
+            &new_timestamps,
+        );
 
         // 3. Diff & Command Ingestor
         self.apply_asset_diffs(&new_tracked_assets, cmd_tx).await;
@@ -634,8 +766,10 @@ impl EngineActor {
         self.tracked_assets = new_tracked_assets;
         self.implication_edges = new_imp_edges;
         self.implication_reverse_edges = new_imp_rev;
-        self.market_outcomes = new_market_outcomes;
-        self.market_expected_outcome_counts = new_market_expected;
+        self.contradiction_edges = new_contradictions;
+        self.partition_outcomes = new_partition_outcomes;
+        self.asset_to_partition = new_asset_to_partition;
+        self.partition_expected_outcome_counts = new_partition_expected;
         self.market_end_timestamps = new_timestamps;
 
         debug!("Successfully synchronized in-memory Graph from Tier 2 Brain API.");
@@ -656,11 +790,15 @@ impl EngineActor {
             return Err(anyhow::anyhow!("BRAIN_API_URL must have a valid host"));
         }
 
-        let res = self
-            .api_client
-            .get(valid_brain_url.join("state")?)
-            .send()
-            .await?;
+        let mut req = self.api_client.get(valid_brain_url.join("state")?);
+
+        if let Ok(brain_api_key) = std::env::var("ADMIN_API_KEY")
+            && !brain_api_key.is_empty()
+        {
+            req = req.header("X-API-Key", brain_api_key);
+        }
+
+        let res = req.send().await?;
 
         if !res.status().is_success() {
             return Err(anyhow::anyhow!(
@@ -701,48 +839,66 @@ impl EngineActor {
         (edges, rev_edges)
     }
 
-    fn parse_partitions(
-        partitions: &[crate::actor::PartitionMapping],
-    ) -> (
-        HashMap<polymarket_client_sdk::types::B256, HashSet<U256>>,
-        HashMap<polymarket_client_sdk::types::B256, usize>,
-    ) {
+    fn parse_contradictions(
+        contradictions: &[crate::actor::ContradictionMapping],
+    ) -> HashMap<U256, Vec<(U256, Decimal)>> {
+        let mut edges: HashMap<U256, Vec<(U256, Decimal)>> = HashMap::new();
+
+        for cont in contradictions {
+            if cont.confidence < MIN_CONFIDENCE_THRESHOLD {
+                continue;
+            }
+            match (
+                U256::from_str_radix(&cont.asset_a, 10),
+                U256::from_str_radix(&cont.asset_b, 10),
+            ) {
+                (Ok(a_id), Ok(b_id)) => {
+                    let weight = Decimal::ONE; // Using 1.0 for mutually exclusive edges by default
+                    edges.entry(a_id).or_default().push((b_id, weight));
+                    edges.entry(b_id).or_default().push((a_id, weight));
+                }
+                _ => {
+                    warn!(
+                        "Failed to parse Contradiction U256 IDs, silently dropping: A: {} | B: {}",
+                        cont.asset_a, cont.asset_b
+                    );
+                }
+            }
+        }
+        edges
+    }
+
+    fn parse_partitions(partitions: &[crate::actor::PartitionMapping]) -> PartitionParseResult {
         let mut outcomes = HashMap::new();
+        let mut asset_to_partition = HashMap::new();
         let mut expected = HashMap::new();
 
         for part in partitions {
             if part.confidence < MIN_CONFIDENCE_THRESHOLD {
                 continue;
             }
-            match polymarket_client_sdk::types::B256::from_str(&part.condition_id) {
-                Ok(cond_id) => {
-                    expected.insert(cond_id, part.expected_outcomes_count);
 
-                    let mut asset_set = HashSet::new();
-                    for a_str in &part.assets {
-                        match U256::from_str_radix(a_str, 10) {
-                            Ok(a_id) => {
-                                asset_set.insert(a_id);
-                            }
-                            Err(_) => {
-                                warn!(
-                                    "Failed to parse Partition Asset U256 ID, dropping asset: {}",
-                                    a_str
-                                );
-                            }
-                        }
+            let partition_id = part.condition_id.clone();
+            expected.insert(partition_id.clone(), part.expected_outcomes_count);
+
+            let mut asset_set = HashSet::new();
+            for a_str in &part.assets {
+                match U256::from_str_radix(a_str, 10) {
+                    Ok(a_id) => {
+                        asset_set.insert(a_id);
+                        asset_to_partition.insert(a_id, partition_id.clone());
                     }
-                    outcomes.insert(cond_id, asset_set);
-                }
-                Err(_) => {
-                    warn!(
-                        "Failed to parse Partition Condition B256 ID, dropping partition: {}",
-                        part.condition_id
-                    );
+                    Err(_) => {
+                        warn!(
+                            "Failed to parse Partition Asset U256 ID, dropping asset: {}",
+                            a_str
+                        );
+                    }
                 }
             }
+            outcomes.insert(partition_id, asset_set);
         }
-        (outcomes, expected)
+        (outcomes, asset_to_partition, expected)
     }
 
     fn parse_timestamps(asset_end_timestamps: &HashMap<String, i64>) -> HashMap<U256, i64> {
@@ -757,7 +913,8 @@ impl EngineActor {
 
     fn compute_tracked_assets(
         edges: &HashMap<U256, Vec<U256>>,
-        outcomes: &HashMap<polymarket_client_sdk::types::B256, HashSet<U256>>,
+        contradictions: &HashMap<U256, Vec<(U256, Decimal)>>,
+        outcomes: &HashMap<String, HashSet<U256>>,
         timestamps: &HashMap<U256, i64>,
     ) -> HashSet<U256> {
         let current_ts = std::time::SystemTime::now()
@@ -768,6 +925,12 @@ impl EngineActor {
         let mut frequency: HashMap<U256, usize> = HashMap::new();
 
         Self::tally_edge_frequencies(&mut frequency, edges, timestamps, current_ts);
+        Self::tally_contradiction_frequencies(
+            &mut frequency,
+            contradictions,
+            timestamps,
+            current_ts,
+        );
         Self::tally_outcome_frequencies(&mut frequency, outcomes, timestamps, current_ts);
 
         Self::sort_and_limit_tracked_assets(frequency)
@@ -799,9 +962,29 @@ impl EngineActor {
         }
     }
 
+    fn tally_contradiction_frequencies(
+        frequency: &mut HashMap<U256, usize>,
+        edges: &HashMap<U256, Vec<(U256, Decimal)>>,
+        timestamps: &HashMap<U256, i64>,
+        current_ts: i64,
+    ) {
+        for (&p, children) in edges {
+            for &(c, _) in children {
+                if p < c {
+                    if Self::is_asset_unexpired(p, timestamps, current_ts) {
+                        *frequency.entry(p).or_insert(0) += 1;
+                    }
+                    if Self::is_asset_unexpired(c, timestamps, current_ts) {
+                        *frequency.entry(c).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+    }
+
     fn tally_outcome_frequencies(
         frequency: &mut HashMap<U256, usize>,
-        outcomes: &HashMap<polymarket_client_sdk::types::B256, HashSet<U256>>,
+        outcomes: &HashMap<String, HashSet<U256>>,
         timestamps: &HashMap<U256, i64>,
         current_ts: i64,
     ) {
@@ -978,6 +1161,64 @@ mod tests {
 
         // Parent = 0.60, Child = 0.50.
         // Expected gross profit = 0.10. Expected total = profit * bounds.
+        assert!(signal.expected_profit_usdc > dec!(0.0));
+        assert_eq!(signal.legs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_engine_actor_triggers_contradiction_arb() {
+        let mut actor = EngineActor::new();
+        let (tx, mut rx) = mpsc::channel(10);
+
+        let peer_a_id = U256::from(10_u64);
+        let peer_b_id = U256::from(20_u64);
+
+        actor
+            .contradiction_edges
+            .insert(peer_a_id, vec![(peer_b_id, Decimal::ONE)]);
+        actor
+            .contradiction_edges
+            .insert(peer_b_id, vec![(peer_a_id, Decimal::ONE)]);
+
+        let peer_a_book = NormalizedOrderbook {
+            asset_id: peer_a_id,
+            market: B256::default(),
+            vwap_bid: dec!(0.60), // High bid, P = 0.60
+            vwap_ask: dec!(0.65),
+            bid_untradeable: false,
+            ask_untradeable: false,
+            timestamp: 123456,
+        };
+
+        let peer_b_book = NormalizedOrderbook {
+            asset_id: peer_b_id,
+            market: B256::default(),
+            vwap_bid: dec!(0.60), // High bid, P = 0.60 (Sum P = 1.20)
+            vwap_ask: dec!(0.65),
+            bid_untradeable: false,
+            ask_untradeable: false,
+            timestamp: 123457,
+        };
+
+        let gas_per_leg_usdc = dec!(0.05);
+
+        // Inject first book, then second book
+        actor
+            .handle_book_update(peer_a_book.clone(), &tx, dec!(0.0), gas_per_leg_usdc)
+            .await;
+        actor
+            .handle_book_update(peer_b_book.clone(), &tx, dec!(0.01), gas_per_leg_usdc)
+            .await;
+
+        // Check cache clearing
+        assert!(!actor.orderbook_cache.contains_key(&peer_a_id));
+        assert!(!actor.orderbook_cache.contains_key(&peer_b_id));
+
+        // Wait for signal
+        let signal = rx.recv().await.unwrap();
+
+        // High ask prices indicate sum > 1.0 (Contradiction).
+        // Profit should be strictly positive.
         assert!(signal.expected_profit_usdc > dec!(0.0));
         assert_eq!(signal.legs.len(), 2);
     }

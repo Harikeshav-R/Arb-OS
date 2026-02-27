@@ -13,6 +13,10 @@ from models import (
     MarketRead,
     RelationshipOutput,
     RelationshipRead,
+    ImplicationMapping,
+    PartitionMapping,
+    ContradictionMapping,
+    BrainStatePayload,
 )
 
 
@@ -144,3 +148,27 @@ class TestAnalyzePairRequest:
             condition_id_b="0xdef",
         )
         assert req.condition_id_a == "0xabc"
+
+
+class TestBrainStateModels:
+    def test_implication_mapping(self):
+        m = ImplicationMapping(parent_asset_id="A", child_asset_id="B", confidence=0.9)
+        assert m.parent_asset_id == "A"
+
+    def test_partition_mapping(self):
+        p = PartitionMapping(condition_id="C", expected_outcomes_count=2,
+                             assets=["A", "B"], confidence=1.0)
+        assert p.expected_outcomes_count == 2
+
+    def test_contradiction_mapping(self):
+        c = ContradictionMapping(asset_a="A", asset_b="B", confidence=0.8)
+        assert c.asset_b == "B"
+
+    def test_brain_state_payload(self):
+        payload = BrainStatePayload(
+            implications=[],
+            partitions=[],
+            contradictions=[],
+            asset_end_timestamps={"A": 1234567890}
+        )
+        assert payload.asset_end_timestamps["A"] == 1234567890

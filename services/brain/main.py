@@ -7,11 +7,12 @@ orchestrated by a LangGraph StateGraph.
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-
 from typing import Any
+
 from fastapi import Depends, FastAPI, HTTPException, Query, Security
 from fastapi.security import APIKeyHeader
 from loguru import logger
@@ -25,8 +26,12 @@ from graph import AnalysisState, build_analysis_graph
 from models import (
     AnalyzePairRequest,
     AnalyzePairResponse,
+    BrainStatePayload,
     GraphStats,
     HealthResponse,
+    ImplicationMapping,
+    PartitionMapping,
+    ContradictionMapping,
     Market,
     MarketRead,
     Relationship,
@@ -478,3 +483,154 @@ async def get_relationships_for_market(
 async def graph_stats():
     """Return high-level statistics about the in-memory relationship graph."""
     return await _graph_manager.get_stats()
+
+
+# ── Graph Sync Endpoint ────────────────────────────────────────────────────────
+
+@app.get("/state", response_model=BrainStatePayload, dependencies=[Depends(_verify_admin)])
+async def get_brain_state(session: AsyncSession = Depends(get_session)):
+    """Return the entire synchronized graph state for the Rust Engine to poll."""
+
+    # 1. Fetch relationships and partition groups
+    implications_dicts = await _graph_manager.get_all_relationships()
+    partitions_lists = await _graph_manager.get_partition_groups()
+
+    # Collect all needed condition IDs to optimize the DB query
+    needed_conditions = set()
+    for rel in implications_dicts:
+        needed_conditions.add(rel["parent_condition_id"])
+        needed_conditions.add(rel["child_condition_id"])
+    for group in partitions_lists:
+        for cid in group:
+            needed_conditions.add(cid)
+
+    if not needed_conditions:
+        return BrainStatePayload(
+            implications=[], partitions=[], contradictions=[], asset_end_timestamps={}
+        )
+
+    # 2. Fetch metadata (tokens and timestamps)
+    result = await session.execute(
+        select(Market.condition_id, Market.end_date, Market.clob_token_ids)
+        .where(
+            Market.active.is_(True),
+            Market.closed.is_(False),
+            Market.condition_id.in_(needed_conditions)
+        )
+    )
+
+    asset_end_timestamps = {}
+    condition_to_yes_token = {}
+
+    for condition_id, end_date, clob_token_ids in result.all():
+        if not clob_token_ids or len(clob_token_ids) == 0:
+            continue
+
+        # The YES token is almost always the first element in the array for binary markets
+        yes_token = clob_token_ids[0]
+        condition_to_yes_token[condition_id] = yes_token
+
+        if end_date:
+            try:
+                # End dates from Polymarket are usually ISO8601 strings
+                dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                asset_end_timestamps[yes_token] = int(dt.timestamp())
+            except Exception as e:
+                (logger.bind(condition_id=condition_id, end_date=end_date, error=str(e))
+                 .warning("failed_to_parse_end_date"))
+
+    # 3. Implications and Contradictions
+    implications = []
+    contradictions = []
+
+    for rel in implications_dicts:
+        parent_token = condition_to_yes_token.get(rel["parent_condition_id"])
+        child_token = condition_to_yes_token.get(rel["child_condition_id"])
+
+        if not parent_token or not child_token:
+            logger.bind(
+                relationship_id=rel.get("id"),
+                parent_condition_id=rel["parent_condition_id"],
+                child_condition_id=rel["child_condition_id"],
+                logic_type=rel["logic_type"]
+            ).debug("skipped_relationship_missing_tokens")
+            continue
+
+        if rel["logic_type"] == "IMPLIES":
+            implications.append(
+                ImplicationMapping(
+                    parent_asset_id=parent_token,
+                    child_asset_id=child_token,
+                    confidence=rel["confidence"],
+                )
+            )
+        elif rel["logic_type"] == "MUTUALLY_EXCLUSIVE":
+            contradictions.append(
+                ContradictionMapping(
+                    asset_a=parent_token,
+                    asset_b=child_token,
+                    confidence=rel["confidence"],
+                )
+            )
+
+    # 4. Partitions
+    partitions = []
+
+    # Build a lookup for mutual exclusion confidences
+    me_confidences = {}
+    for rel in implications_dicts:
+        if rel["logic_type"] == "MUTUALLY_EXCLUSIVE":
+            c1, c2 = rel["parent_condition_id"], rel["child_condition_id"]
+            me_confidences[f"{c1}|{c2}"] = rel["confidence"]
+            me_confidences[f"{c2}|{c1}"] = rel["confidence"]
+
+    for i, group in enumerate(partitions_lists):
+        if len(group) >= 2:
+            group_tokens = []
+            for cid in group:
+                tok = condition_to_yes_token.get(cid)
+                if tok:
+                    group_tokens.append(tok)
+                else:
+                    (logger.bind(condition_id=cid, group=group)
+                     .debug("partition_member_missing_token"))
+
+            if len(group_tokens) >= 2:
+                # Calculate minimum confidence and verify clique
+                group_confs = []
+                is_clique = True
+                for j in range(len(group)):
+                    for k in range(j + 1, len(group)):
+                        conf = me_confidences.get(f"{group[j]}|{group[k]}")
+                        if conf is not None:
+                            group_confs.append(conf)
+                        else:
+                            is_clique = False
+                            break
+                    if not is_clique:
+                        break
+
+                if not is_clique:
+                    logger.bind(group=group).debug("skipped_partition_not_clique")
+                    continue
+
+                partition_confidence = min(group_confs) if group_confs else 1.0
+
+                # Hash the sorted assets to get a deterministic B256-like condition ID
+                hash_input = "v1_" + "_".join(sorted(group_tokens))
+                hash_id = hashlib.sha256(hash_input.encode()).hexdigest()
+                partitions.append(
+                    PartitionMapping(
+                        condition_id=f"0x{hash_id}",
+                        expected_outcomes_count=len(group_tokens),
+                        assets=group_tokens,
+                        confidence=partition_confidence
+                    )
+                )
+
+    return BrainStatePayload(
+        implications=implications,
+        partitions=partitions,
+        contradictions=contradictions,
+        asset_end_timestamps=asset_end_timestamps
+    )
