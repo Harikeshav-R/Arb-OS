@@ -55,14 +55,14 @@ pub struct EngineActor {
     // Map of undirected contradicting mutually-exclusive peers (A implies NOT B, etc.)
     pub contradiction_edges: HashMap<U256, Vec<(U256, Decimal)>>, // Peer -> (Peer ID, Default Weight 1.0)
 
-    // Map of Market (Condition) -> Set of Asset IDs (Outcomes)
-    pub market_outcomes: HashMap<String, HashSet<U256>>,
+    // Map of Partition ID -> Set of Asset IDs (Outcomes)
+    pub partition_outcomes: HashMap<String, HashSet<U256>>,
 
     // Map of Asset ID -> Partition ID (for O(1) partition lookups)
     pub asset_to_partition: HashMap<U256, String>,
 
-    // Map of Market (Condition) -> Required Number of Outcomes for Exhaustiveness
-    pub market_expected_outcome_counts: HashMap<String, usize>,
+    // Map of Partition ID -> Required Number of Outcomes for Exhaustiveness
+    pub partition_expected_outcome_counts: HashMap<String, usize>,
 
     // Map of Asset ID -> Resolution Deadline (Timestamp in seconds)
     pub market_end_timestamps: HashMap<U256, i64>,
@@ -101,9 +101,9 @@ impl EngineActor {
             implication_edges: HashMap::new(),
             implication_reverse_edges: HashMap::new(),
             contradiction_edges: HashMap::new(),
-            market_outcomes: HashMap::new(),
+            partition_outcomes: HashMap::new(),
             asset_to_partition: HashMap::new(),
-            market_expected_outcome_counts: HashMap::new(),
+            partition_expected_outcome_counts: HashMap::new(),
             market_end_timestamps: HashMap::new(),
             tracked_assets: HashSet::new(),
             current_gas_usdc_per_leg: (ESTIMATED_GAS_UNITS_PER_LEG * ESTIMATED_GWEI_PRICE)
@@ -530,7 +530,7 @@ impl EngineActor {
     }
 
     fn get_partition_bids(&self, partition_id: &str) -> Option<Vec<(U256, Decimal)>> {
-        let outcome_assets = self.market_outcomes.get(partition_id)?;
+        let outcome_assets = self.partition_outcomes.get(partition_id)?;
         let mut bids = Vec::new();
 
         for asset in outcome_assets {
@@ -555,7 +555,7 @@ impl EngineActor {
     ) -> bool {
         // Enforce strict exhaustiveness: Are we receiving the EXACT number of outcomes for this partition?
         let required_outcome_count = self
-            .market_expected_outcome_counts
+            .partition_expected_outcome_counts
             .get(partition_id)
             .copied()
             .unwrap_or(0);
@@ -746,7 +746,7 @@ impl EngineActor {
 
         // 1. Parse Graph Edges
         let (new_imp_edges, new_imp_rev) = Self::parse_implications(&payload.implications);
-        let (new_market_outcomes, new_asset_to_partition, new_market_expected) =
+        let (new_partition_outcomes, new_asset_to_partition, new_partition_expected) =
             Self::parse_partitions(&payload.partitions);
         let new_contradictions = Self::parse_contradictions(&payload.contradictions);
         let new_timestamps = Self::parse_timestamps(&payload.asset_end_timestamps);
@@ -755,7 +755,7 @@ impl EngineActor {
         let new_tracked_assets = Self::compute_tracked_assets(
             &new_imp_edges,
             &new_contradictions,
-            &new_market_outcomes,
+            &new_partition_outcomes,
             &new_timestamps,
         );
 
@@ -767,9 +767,9 @@ impl EngineActor {
         self.implication_edges = new_imp_edges;
         self.implication_reverse_edges = new_imp_rev;
         self.contradiction_edges = new_contradictions;
-        self.market_outcomes = new_market_outcomes;
+        self.partition_outcomes = new_partition_outcomes;
         self.asset_to_partition = new_asset_to_partition;
-        self.market_expected_outcome_counts = new_market_expected;
+        self.partition_expected_outcome_counts = new_partition_expected;
         self.market_end_timestamps = new_timestamps;
 
         debug!("Successfully synchronized in-memory Graph from Tier 2 Brain API.");
@@ -790,16 +790,15 @@ impl EngineActor {
             return Err(anyhow::anyhow!("BRAIN_API_URL must have a valid host"));
         }
 
-        let brain_api_key = std::env::var("ADMIN_API_KEY").map_err(|_| {
-            anyhow::anyhow!("ADMIN_API_KEY environment variable is required to sync brain state")
-        })?;
+        let mut req = self.api_client.get(valid_brain_url.join("state")?);
 
-        let res = self
-            .api_client
-            .get(valid_brain_url.join("state")?)
-            .header("X-API-Key", brain_api_key)
-            .send()
-            .await?;
+        if let Ok(brain_api_key) = std::env::var("ADMIN_API_KEY")
+            && !brain_api_key.is_empty()
+        {
+            req = req.header("X-API-Key", brain_api_key);
+        }
+
+        let res = req.send().await?;
 
         if !res.status().is_success() {
             return Err(anyhow::anyhow!(

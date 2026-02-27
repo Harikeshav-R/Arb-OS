@@ -583,7 +583,7 @@ async def get_brain_state(session: AsyncSession = Depends(get_session)):
                 partitions.append(
                     PartitionMapping(
                         condition_id=f"0x{hash_id}",
-                        expected_outcomes_count=len(group),
+                        expected_outcomes_count=len(group_tokens),
                         assets=group_tokens,
                         confidence=partition_confidence
                     )
