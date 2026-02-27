@@ -611,9 +611,9 @@ impl EngineActor {
         fee_rate: Decimal,
         gas_per_leg_usdc: Decimal,
     ) {
-        let condition_id = book.asset_id;
+        let asset_id = book.asset_id;
 
-        let peers = match self.contradiction_edges.get(&condition_id) {
+        let peers = match self.contradiction_edges.get(&asset_id) {
             Some(p) => p.clone(),
             None => return,
         };
@@ -628,10 +628,10 @@ impl EngineActor {
                 continue;
             }
 
-            let ask_a = book.vwap_ask;
-            let ask_b = peer_book.vwap_ask;
+            let bid_a = book.vwap_bid;
+            let bid_b = peer_book.vwap_bid;
 
-            if ask_a <= Decimal::ZERO || ask_b <= Decimal::ZERO {
+            if bid_a <= Decimal::ZERO || bid_b <= Decimal::ZERO {
                 continue;
             }
 
@@ -643,24 +643,23 @@ impl EngineActor {
             let weight_b = weight;
 
             if let Some(profit) = crate::strategies::contradiction::ContradictionStrategy::check(
-                condition_id,
-                ask_a,
+                asset_id,
+                bid_a,
                 weight_a,
                 peer_id,
-                ask_b,
+                bid_b,
                 weight_b,
                 fee_rate,
                 total_est_gas_usdc,
             ) {
-                // Sizing follows partition strategy style: max(ask_a, ask_b) controls risk limit
-                let highest_price = ask_a.max(ask_b);
-                let consistent_size_shares =
-                    arbos_core::constants::TARGET_LIQUIDITY / highest_price;
+                // Sizing follows logic from strategy: TARGET_LIQUIDITY / sum_bids
+                let sum_bids = bid_a + bid_b;
+                let consistent_size_shares = arbos_core::constants::TARGET_LIQUIDITY / sum_bids;
 
                 let signal = ArbSignal {
                     legs: vec![
                         TradeAction::Sell {
-                            asset_id: condition_id,
+                            asset_id,
                             size: consistent_size_shares,
                         },
                         TradeAction::Sell {
@@ -673,7 +672,7 @@ impl EngineActor {
                 };
 
                 info!(
-                    asset_a = %condition_id,
+                    asset_a = %asset_id,
                     asset_b = %peer_id,
                     profit = %profit,
                     "Routing Contradiction ArbSignal to Bot"
@@ -686,7 +685,7 @@ impl EngineActor {
                 }
 
                 // Eject executed legs
-                self.orderbook_cache.remove(&condition_id);
+                self.orderbook_cache.remove(&asset_id);
                 self.orderbook_cache.remove(&peer_id);
 
                 // Break after executing one contradiction for this asset to avoid double-spend
@@ -954,12 +953,14 @@ impl EngineActor {
         current_ts: i64,
     ) {
         for (&p, children) in edges {
-            if Self::is_asset_unexpired(p, timestamps, current_ts) {
-                *frequency.entry(p).or_insert(0) += 1;
-            }
             for &(c, _) in children {
-                if Self::is_asset_unexpired(c, timestamps, current_ts) {
-                    *frequency.entry(c).or_insert(0) += 1;
+                if p < c {
+                    if Self::is_asset_unexpired(p, timestamps, current_ts) {
+                        *frequency.entry(p).or_insert(0) += 1;
+                    }
+                    if Self::is_asset_unexpired(c, timestamps, current_ts) {
+                        *frequency.entry(c).or_insert(0) += 1;
+                    }
                 }
             }
         }
@@ -1166,8 +1167,8 @@ mod tests {
         let peer_a_book = NormalizedOrderbook {
             asset_id: peer_a_id,
             market: B256::default(),
-            vwap_bid: dec!(0.55),
-            vwap_ask: dec!(0.60), // High ask, P = 0.60
+            vwap_bid: dec!(0.60), // High bid, P = 0.60
+            vwap_ask: dec!(0.65),
             bid_untradeable: false,
             ask_untradeable: false,
             timestamp: 123456,
@@ -1176,8 +1177,8 @@ mod tests {
         let peer_b_book = NormalizedOrderbook {
             asset_id: peer_b_id,
             market: B256::default(),
-            vwap_bid: dec!(0.55),
-            vwap_ask: dec!(0.60), // High ask, P = 0.60 (Sum P = 1.20)
+            vwap_bid: dec!(0.60), // High bid, P = 0.60 (Sum P = 1.20)
+            vwap_ask: dec!(0.65),
             bid_untradeable: false,
             ask_untradeable: false,
             timestamp: 123457,
