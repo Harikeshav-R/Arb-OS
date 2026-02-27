@@ -11,7 +11,6 @@ RUN pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm run build
 
-# ── Stage 2: Serve ───────────────────────────────────────────────────────────
 FROM nginx:stable-alpine AS runtime
 
 # Remove default nginx config
