@@ -1,0 +1,17 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/ingestor",
+    "crates/engine",
+    "crates/bot"
+]
+resolver = "2"
+
+[workspace.dependencies]
+tokio = { version = "1.49.0", features = ["full"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+polymarket-client-sdk = "0.4.2"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+anyhow = "1.0.95"
