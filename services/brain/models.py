@@ -138,3 +138,33 @@ class HealthResponse(BaseModel):
     status: str
     db_connected: bool
     llm_configured: bool
+
+
+class ImplicationMapping(BaseModel):
+    """An implication edge between two markets."""
+    parent_asset_id: str
+    child_asset_id: str
+    confidence: float
+
+
+class PartitionMapping(BaseModel):
+    """A group of mutually exclusive markets representing options to a question."""
+    condition_id: str
+    expected_outcomes_count: int
+    assets: list[str]
+    confidence: float
+
+
+class ContradictionMapping(BaseModel):
+    """A pair of mutually exclusive markets."""
+    asset_a: str
+    asset_b: str
+    confidence: float
+
+
+class BrainStatePayload(BaseModel):
+    """The aggregate graph state polled by the Rust Engine."""
+    implications: list[ImplicationMapping]
+    partitions: list[PartitionMapping]
+    contradictions: list[ContradictionMapping]
+    asset_end_timestamps: dict[str, int]

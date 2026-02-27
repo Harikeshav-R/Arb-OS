@@ -25,8 +25,12 @@ from graph import AnalysisState, build_analysis_graph
 from models import (
     AnalyzePairRequest,
     AnalyzePairResponse,
+    BrainStatePayload,
     GraphStats,
     HealthResponse,
+    ImplicationMapping,
+    PartitionMapping,
+    ContradictionMapping,
     Market,
     MarketRead,
     Relationship,
@@ -478,3 +482,96 @@ async def get_relationships_for_market(
 async def graph_stats():
     """Return high-level statistics about the in-memory relationship graph."""
     return await _graph_manager.get_stats()
+
+
+# ── Graph Sync Endpoint ────────────────────────────────────────────────────────
+
+@app.get("/state", response_model=BrainStatePayload)
+async def get_brain_state(session: AsyncSession = Depends(get_session)):
+    """Return the entire synchronized graph state for the Rust Engine to poll."""
+
+    # 1. Fetch metadata (tokens and timestamps)
+    result = await session.execute(
+        select(Market.condition_id, Market.end_date, Market.clob_token_ids)
+        .where(Market.active.is_(True), Market.closed.is_(False))
+    )
+
+    asset_end_timestamps = {}
+    condition_to_yes_token = {}
+
+    for condition_id, end_date, clob_token_ids in result.all():
+        if not clob_token_ids or len(clob_token_ids) == 0:
+            continue
+
+        # The YES token is almost always the first element in the array for binary markets
+        yes_token = clob_token_ids[0]
+        condition_to_yes_token[condition_id] = yes_token
+
+        if end_date:
+            try:
+                # End dates from Polymarket are usually ISO8601 strings
+                dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                asset_end_timestamps[yes_token] = int(dt.timestamp())
+            except Exception:
+                pass
+
+    # 2. Implications and Contradictions
+    implications_dicts = await _graph_manager.get_all_relationships()
+    implications = []
+    contradictions = []
+
+    for rel in implications_dicts:
+        parent_token = condition_to_yes_token.get(rel["parent_condition_id"])
+        child_token = condition_to_yes_token.get(rel["child_condition_id"])
+
+        if not parent_token or not child_token:
+            continue
+
+        if rel["logic_type"] == "IMPLIES":
+            implications.append(
+                ImplicationMapping(
+                    parent_asset_id=parent_token,
+                    child_asset_id=child_token,
+                    confidence=rel["confidence"],
+                )
+            )
+        elif rel["logic_type"] == "MUTUALLY_EXCLUSIVE":
+            contradictions.append(
+                ContradictionMapping(
+                    asset_a=parent_token,
+                    asset_b=child_token,
+                    confidence=rel["confidence"],
+                )
+            )
+
+    # 3. Partitions
+    partitions_lists = await _graph_manager.get_partition_groups()
+    partitions = []
+
+    import hashlib
+    for i, group in enumerate(partitions_lists):
+        if len(group) >= 2:
+            group_tokens = []
+            for cid in group:
+                tok = condition_to_yes_token.get(cid)
+                if tok:
+                    group_tokens.append(tok)
+
+            if len(group_tokens) >= 2:
+                # Hash the sorted assets to get a deterministic B256-like condition ID
+                hash_id = hashlib.sha256("".join(sorted(group_tokens)).encode()).hexdigest()
+                partitions.append(
+                    PartitionMapping(
+                        condition_id=f"0x{hash_id}",
+                        expected_outcomes_count=len(group_tokens),
+                        assets=group_tokens,
+                        confidence=1.0  # Inherited confidence
+                    )
+                )
+
+    return BrainStatePayload(
+        implications=implications,
+        partitions=partitions,
+        contradictions=contradictions,
+        asset_end_timestamps=asset_end_timestamps
+    )
