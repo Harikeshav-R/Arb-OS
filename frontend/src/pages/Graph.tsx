@@ -4,6 +4,7 @@ import Navbar from '../components/Navbar';
 import ProgressBar from '../components/ProgressBar';
 import StepNav from '../components/StepNav';
 import ForceGraph, { DEFAULT_NODES, DEFAULT_EDGES } from '../components/ForceGraph';
+import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '../components/ui/resizable';
 
 interface ChatMessage {
   role: 'ai' | 'user';
@@ -31,6 +32,7 @@ export default function Graph() {
   const [typing, setTyping] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const [graphKey, setGraphKey] = useState(0);
+  const hasUserSentMessage = messages.some(m => m.role === 'user');
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -51,9 +53,9 @@ export default function Graph() {
   };
 
   return (
-    <div className="min-h-screen bg-background flex flex-col">
+    <div className="h-screen bg-background flex flex-col overflow-hidden">
       <Navbar />
-      <div className="pt-14">
+      <div className="pt-14 shrink-0">
         <ProgressBar currentStep={2} />
       </div>
 
@@ -61,14 +63,13 @@ export default function Graph() {
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         transition={{ duration: 0.2 }}
-        className="flex-1 flex flex-col md:flex-row overflow-hidden"
+        className="flex-1 min-h-0 flex overflow-hidden"
       >
-        {/* Left Panel — Chat */}
-        <div className="w-full md:w-[40%] flex flex-col bg-muted border-r border-border" style={{ height: 'calc(100vh - 56px - 41px - 53px)' }}>
-          {/* Chat Header */}
-          <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+        <ResizablePanelGroup direction="horizontal" className="h-full">
+          <ResizablePanel defaultSize={40} minSize={25} maxSize={70} className="flex flex-col min-w-0 bg-muted">
+            {/* Chat Header */}
+            <div className="flex shrink-0 items-center justify-between px-4 py-3 border-b border-border">
             <div className="flex items-center gap-2">
-              <span className="text-sm">🧠</span>
               <span className="text-sm font-semibold text-foreground">ArbOS Brain</span>
             </div>
             <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-secondary/20 text-secondary border border-secondary/30">
@@ -77,7 +78,7 @@ export default function Graph() {
           </div>
 
           {/* Messages */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
             {messages.map((msg, i) => (
               <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div
@@ -104,7 +105,7 @@ export default function Graph() {
           </div>
 
           {/* Stats */}
-          <div className="px-4 py-2 border-t border-border">
+          <div className="shrink-0 px-4 py-2 border-t border-border">
             <div className="font-mono text-[10px] text-muted-foreground flex gap-4">
               <span>Nodes: <span className="text-primary">14</span></span>
               <span>Edges: <span className="text-primary">23</span></span>
@@ -113,7 +114,7 @@ export default function Graph() {
           </div>
 
           {/* Input */}
-          <div className="p-3 border-t border-border">
+          <div className="shrink-0 p-3 border-t border-border">
             <div className="flex gap-2">
               <input
                 value={input}
@@ -134,31 +135,45 @@ export default function Graph() {
               Try: /add crypto · /remove · /scan · /suggest
             </p>
           </div>
-        </div>
+          </ResizablePanel>
 
-        {/* Right Panel — Graph */}
-        <div className="w-full md:w-[60%] bg-background relative" style={{ height: 'calc(100vh - 56px - 41px - 53px)', minHeight: '400px' }}>
-          <ForceGraph
-            key={graphKey}
-            nodes={DEFAULT_NODES}
-            edges={DEFAULT_EDGES}
-            width={700}
-            height={500}
-            animated
-          />
-          {/* Legend */}
-          <div className="absolute bottom-4 left-4 bg-card/80 backdrop-blur border border-border rounded-md px-3 py-2 text-[10px] font-mono text-muted-foreground space-y-1">
-            <div>── IMPLIES &nbsp; -- EXCLUSIVE &nbsp; ·· PARTITION</div>
-            <div>
-              <span className="text-primary">●</span> Active Arb &nbsp;
-              <span className="text-muted-foreground">●</span> Monitored &nbsp;
-              <span className="text-destructive">●</span> Low Liquidity
+          <ResizableHandle withHandle className="bg-border hover:bg-primary/20 transition-colors" />
+
+          {/* Right Panel — Graph */}
+          <ResizablePanel defaultSize={60} minSize={30} maxSize={75} className="min-w-0 bg-background">
+            <div className="w-full h-full bg-background relative flex items-center justify-center" style={{ minHeight: '400px' }}>
+              {hasUserSentMessage ? (
+                <>
+                  <ForceGraph
+                    key={graphKey}
+                    nodes={DEFAULT_NODES}
+                    edges={DEFAULT_EDGES}
+                    width={700}
+                    height={500}
+                    animated
+                  />
+                  {/* Legend */}
+                  <div className="absolute bottom-4 left-4 bg-card/80 backdrop-blur border border-border rounded-md px-3 py-2 text-[10px] font-mono text-muted-foreground space-y-1">
+                    <div>── IMPLIES &nbsp; -- EXCLUSIVE &nbsp; ·· PARTITION</div>
+                    <div>
+                      <span className="text-primary">●</span> Active Arb &nbsp;
+                      <span className="text-muted-foreground">●</span> Monitored &nbsp;
+                      <span className="text-destructive">●</span> Low Liquidity
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground font-mono">
+                  Type something in the chat to build your graph
+                </p>
+              )}
             </div>
-          </div>
-        </div>
+          </ResizablePanel>
+        </ResizablePanelGroup>
       </motion.div>
 
-      <StepNav
+      <div className="shrink-0">
+        <StepNav
         backTo="/connect"
         backLabel="← Back"
         nextTo="/configure"
@@ -169,6 +184,7 @@ export default function Graph() {
           </span>
         }
       />
+      </div>
     </div>
   );
 }
