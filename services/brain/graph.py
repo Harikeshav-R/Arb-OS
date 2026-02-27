@@ -5,7 +5,8 @@ Implements a 3-node pipeline:
     START → validate_pair → classify_relationship → persist_result → END
 
 Each node is a plain async function that receives and returns state updates.
-The graph is compiled once at application startup via ``build_analysis_graph``.
+The graph is compiled per analysis request (or per pair during a scan)
+via ``build_analysis_graph`` to capture the current DB session and settings.
 """
 
 from __future__ import annotations
@@ -194,6 +195,9 @@ async def persist_result(state: AnalysisState, *, session: AsyncSession) -> dict
     direction = rel_data["direction"]
     if direction == "B_TO_A":
         parent_cid, child_cid = cid_b, cid_a
+    elif direction == "NONE":
+        # Canonicalize undirected relationships so (A, B) and (B, A) are treated the same
+        parent_cid, child_cid = sorted([cid_a, cid_b])
     else:
         parent_cid, child_cid = cid_a, cid_b
 
@@ -261,6 +265,7 @@ def build_analysis_graph(
         model_id=settings.watsonx_model_id,
         url=settings.watsonx_url,
         project_id=settings.watsonx_project_id,
+        apikey=settings.watsonx_apikey.get_secret_value() if settings.watsonx_apikey else None,
         params={
             "temperature": settings.brain_llm_temperature,
             "max_tokens": settings.brain_llm_max_tokens,
