@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlmodel import JSON, Column, Field as SQLField, SQLModel, UniqueConstraint
 
 
@@ -66,6 +66,21 @@ class RelationshipOutput(BaseModel):
     direction: Literal["A_TO_B", "B_TO_A", "NONE"]
     confidence: float = Field(ge=0.0, le=1.0)
     reasoning: str
+
+    @model_validator(mode="after")
+    def enforce_direction(self) -> RelationshipOutput:
+        """Enforce directional constraints based on logic type."""
+        if self.relation in ("MUTUALLY_EXCLUSIVE", "INDEPENDENT"):
+            if self.direction != "NONE":
+                raise ValueError(
+                    f"direction must be 'NONE' for relation '{self.relation}'"
+                )
+        elif self.relation == "IMPLIES":
+            if self.direction == "NONE":
+                raise ValueError(
+                    "direction must be 'A_TO_B' or 'B_TO_A' for 'IMPLIES'"
+                )
+        return self
 
 
 class AnalyzePairRequest(BaseModel):

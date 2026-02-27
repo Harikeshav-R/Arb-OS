@@ -134,17 +134,28 @@ async def classify_relationship(
     except Exception:
         logger.exception("classify_llm_error")
         # Fallback: raw text invocation + manual parse
-        raw_response = await llm.ainvoke(messages)
         try:
-            result = RelationshipOutput.model_validate_json(raw_response.content)
+            raw_response = await llm.ainvoke(messages)
+            try:
+                result = RelationshipOutput.model_validate_json(raw_response.content)
+            except Exception:
+                logger.error("classify_parse_fallback_failed", content=raw_response.content[:200])
+                return {
+                    "relationship": RelationshipOutput(
+                        relation="INDEPENDENT",
+                        direction="NONE",
+                        confidence=0.0,
+                        reasoning="LLM output could not be parsed.",
+                    ).model_dump(),
+                }
         except Exception:
-            logger.error("classify_parse_fallback_failed", content=raw_response.content[:200])
+            logger.exception("classify_raw_llm_failed_completely")
             return {
                 "relationship": RelationshipOutput(
                     relation="INDEPENDENT",
                     direction="NONE",
                     confidence=0.0,
-                    reasoning="LLM output could not be parsed.",
+                    reasoning="LLM API completely failed.",
                 ).model_dump(),
             }
 

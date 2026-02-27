@@ -274,7 +274,7 @@ async def analyze_pair(
 
     # Update in-memory graph
     if rel.relation != "INDEPENDENT":
-        _graph_manager.add_relationship(parent, child, rel.relation, rel.confidence)
+        await _graph_manager.add_relationship(parent, child, rel.relation, rel.confidence)
 
     return AnalyzePairResponse(
         relationship=rel,
@@ -349,14 +349,14 @@ async def scan_markets(
                     if rel_data and rel_data["relation"] != "INDEPENDENT":
                         direction = rel_data["direction"]
                         if direction == "B_TO_A":
-                            _graph_manager.add_relationship(
+                            await _graph_manager.add_relationship(
                                 market_b.condition_id,
                                 market_a.condition_id,
                                 rel_data["relation"],
                                 rel_data["confidence"],
                             )
                         else:
-                            _graph_manager.add_relationship(
+                            await _graph_manager.add_relationship(
                                 market_a.condition_id,
                                 market_b.condition_id,
                                 rel_data["relation"],

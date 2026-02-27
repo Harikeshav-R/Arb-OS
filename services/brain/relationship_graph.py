@@ -7,6 +7,8 @@ graph-level statistics.
 
 from __future__ import annotations
 
+import asyncio
+
 import networkx as nx
 from loguru import logger
 from sqlalchemy import select
@@ -20,6 +22,7 @@ class RelationshipGraphManager:
 
     def __init__(self) -> None:
         self._graph: nx.DiGraph = nx.DiGraph()
+        self._lock = asyncio.Lock()
 
     # ── Loading ───────────────────────────────────────────────────────────────
 
@@ -30,24 +33,26 @@ class RelationshipGraphManager:
         )
         relationships = result.scalars().all()
 
-        self._graph.clear()
-        for rel in relationships:
-            self.add_relationship(
-                parent_id=rel.parent_condition_id,
-                child_id=rel.child_condition_id,
-                logic_type=rel.logic_type,
-                confidence=rel.confidence,
-            )
+        async with self._lock:
+            self._graph.clear()
+            for rel in relationships:
+                # Add edges directly to avoid recursive locking payload
+                self._graph.add_edge(
+                    rel.parent_condition_id,
+                    rel.child_condition_id,
+                    logic_type=rel.logic_type,
+                    confidence=rel.confidence,
+                )
 
-        logger.info(
-            "graph_loaded",
-            nodes=self._graph.number_of_nodes(),
-            edges=self._graph.number_of_edges(),
-        )
+            logger.info(
+                "graph_loaded",
+                nodes=self._graph.number_of_nodes(),
+                edges=self._graph.number_of_edges(),
+            )
 
     # ── Mutations ─────────────────────────────────────────────────────────────
 
-    def add_relationship(
+    async def add_relationship(
             self,
             parent_id: str,
             child_id: str,
@@ -55,12 +60,13 @@ class RelationshipGraphManager:
             confidence: float,
     ) -> None:
         """Add or update an edge in the in-memory graph."""
-        self._graph.add_edge(
-            parent_id,
-            child_id,
-            logic_type=logic_type,
-            confidence=confidence,
-        )
+        async with self._lock:
+            self._graph.add_edge(
+                parent_id,
+                child_id,
+                logic_type=logic_type,
+                confidence=confidence,
+            )
 
     # ── Queries ───────────────────────────────────────────────────────────────
 
