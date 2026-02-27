@@ -1,7 +1,6 @@
 # ── Stage 1: Build ───────────────────────────────────────────────────────────
 FROM rust:1.93-slim-bookworm AS builder
 
-# Install build dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends pkg-config libssl-dev && \
     rm -rf /var/lib/apt/lists/*

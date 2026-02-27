@@ -11,7 +11,6 @@ RUN uv sync --frozen --no-cache --no-dev
 FROM python:3.13-slim AS runtime
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Security: run as non-root
 RUN groupadd --gid 1000 brain && \
     useradd --uid 1000 --gid brain --shell /bin/sh --create-home brain
 
