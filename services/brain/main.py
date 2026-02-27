@@ -491,10 +491,32 @@ async def graph_stats():
 async def get_brain_state(session: AsyncSession = Depends(get_session)):
     """Return the entire synchronized graph state for the Rust Engine to poll."""
 
-    # 1. Fetch metadata (tokens and timestamps)
+    # 1. Fetch relationships and partition groups
+    implications_dicts = await _graph_manager.get_all_relationships()
+    partitions_lists = await _graph_manager.get_partition_groups()
+
+    # Collect all needed condition IDs to optimize the DB query
+    needed_conditions = set()
+    for rel in implications_dicts:
+        needed_conditions.add(rel["parent_condition_id"])
+        needed_conditions.add(rel["child_condition_id"])
+    for group in partitions_lists:
+        for cid in group:
+            needed_conditions.add(cid)
+
+    if not needed_conditions:
+        return BrainStatePayload(
+            implications=[], partitions=[], contradictions=[], asset_end_timestamps={}
+        )
+
+    # 2. Fetch metadata (tokens and timestamps)
     result = await session.execute(
         select(Market.condition_id, Market.end_date, Market.clob_token_ids)
-        .where(Market.active.is_(True), Market.closed.is_(False))
+        .where(
+            Market.active.is_(True),
+            Market.closed.is_(False),
+            Market.condition_id.in_(needed_conditions)
+        )
     )
 
     asset_end_timestamps = {}
@@ -517,8 +539,7 @@ async def get_brain_state(session: AsyncSession = Depends(get_session)):
                 (logger.bind(condition_id=condition_id, end_date=end_date, error=str(e))
                  .warning("failed_to_parse_end_date"))
 
-    # 2. Implications and Contradictions
-    implications_dicts = await _graph_manager.get_all_relationships()
+    # 3. Implications and Contradictions
     implications = []
     contradictions = []
 
@@ -527,6 +548,12 @@ async def get_brain_state(session: AsyncSession = Depends(get_session)):
         child_token = condition_to_yes_token.get(rel["child_condition_id"])
 
         if not parent_token or not child_token:
+            logger.bind(
+                relationship_id=rel.get("id"),
+                parent_condition_id=rel["parent_condition_id"],
+                child_condition_id=rel["child_condition_id"],
+                logic_type=rel["logic_type"]
+            ).debug("skipped_relationship_missing_tokens")
             continue
 
         if rel["logic_type"] == "IMPLIES":
@@ -546,8 +573,7 @@ async def get_brain_state(session: AsyncSession = Depends(get_session)):
                 )
             )
 
-    # 3. Partitions
-    partitions_lists = await _graph_manager.get_partition_groups()
+    # 4. Partitions
     partitions = []
 
     # Build a lookup for mutual exclusion confidences
@@ -565,15 +591,28 @@ async def get_brain_state(session: AsyncSession = Depends(get_session)):
                 tok = condition_to_yes_token.get(cid)
                 if tok:
                     group_tokens.append(tok)
+                else:
+                    (logger.bind(condition_id=cid, group=group)
+                     .debug("partition_member_missing_token"))
 
             if len(group_tokens) >= 2:
-                # Calculate minimum confidence among mutually exclusive edges within the group
+                # Calculate minimum confidence and verify clique
                 group_confs = []
+                is_clique = True
                 for j in range(len(group)):
                     for k in range(j + 1, len(group)):
                         conf = me_confidences.get(f"{group[j]}|{group[k]}")
                         if conf is not None:
                             group_confs.append(conf)
+                        else:
+                            is_clique = False
+                            break
+                    if not is_clique:
+                        break
+
+                if not is_clique:
+                    logger.bind(group=group).debug("skipped_partition_not_clique")
+                    continue
 
                 partition_confidence = min(group_confs) if group_confs else 1.0
 
