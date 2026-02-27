@@ -52,7 +52,7 @@ _gamma_client: GammaClient | None = None
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
-def _verify_admin(api_key: str = Security(_api_key_header)) -> None:
+def _verify_admin(api_key: str | None = Security(_api_key_header)) -> None:
     """Verify the admin API key for protected endpoints."""
     settings = get_settings()
     if not settings.admin_api_key:
@@ -153,6 +153,7 @@ async def sync_markets(session: AsyncSession = Depends(get_session)):
     settings = get_settings()
     raw_markets = await _gamma_client.fetch_all_active_markets(
         min_volume=settings.brain_gamma_min_volume,
+        fetch_limit=settings.brain_gamma_fetch_limit,
     )
 
     created = 0
@@ -340,9 +341,6 @@ async def scan_markets(
         for market_b in markets[i + 1:]:
             # Skip already-analyzed pairs (even if inactive right now, unless we want
             # to re-scan them)
-            # PR Comment asked:
-            # "If inactive relationships should be reprocessed, add
-            # Relationship.is_active.is_(True) to this query."
             existing = await session.execute(
                 select(Relationship).where(
                     Relationship.is_active.is_(True),

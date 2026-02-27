@@ -69,7 +69,11 @@ class GammaClient:
         }
         return await self._get("/markets", params)
 
-    async def fetch_all_active_markets(self, min_volume: int = 1000) -> list[dict]:
+    async def fetch_all_active_markets(
+            self,
+            min_volume: int = 1000,
+            fetch_limit: int = 100,
+    ) -> list[dict]:
         """Paginate through all active, open markets above *min_volume*.
 
         Gamma API max page size is 100, so we paginate until we receive fewer
@@ -77,13 +81,12 @@ class GammaClient:
         """
         all_markets: list[dict] = []
         offset = 0
-        page_size = 100
 
         while True:
             page = await self.fetch_markets(
                 active=True,
                 closed=False,
-                limit=page_size,
+                limit=fetch_limit,
                 offset=offset
             )
             if not page:
@@ -94,9 +97,9 @@ class GammaClient:
                 if volume >= min_volume:
                     all_markets.append(market)
 
-            if len(page) < page_size:
+            if len(page) < fetch_limit:
                 break
-            offset += page_size
+            offset += fetch_limit
 
         logger.bind(
             total=len(all_markets),
