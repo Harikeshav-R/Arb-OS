@@ -790,7 +790,9 @@ impl EngineActor {
             return Err(anyhow::anyhow!("BRAIN_API_URL must have a valid host"));
         }
 
-        let brain_api_key = std::env::var("BRAIN_API_KEY").unwrap_or_else(|_| "".to_string());
+        let brain_api_key = std::env::var("ADMIN_API_KEY").map_err(|_| {
+            anyhow::anyhow!("ADMIN_API_KEY environment variable is required to sync brain state")
+        })?;
 
         let res = self
             .api_client
