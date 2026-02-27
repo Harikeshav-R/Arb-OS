@@ -1,0 +1,44 @@
+repos:
+-   repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+    -   id: check-yaml
+    -   id: end-of-file-fixer
+    -   id: trailing-whitespace
+-   repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.0.280
+    hooks:
+    -   id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+-   repo: local
+    hooks:
+    -   id: cargo-fmt
+        name: cargo fmt
+        description: Format files with rustfmt.
+        entry: cargo fmt
+        language: system
+        types: [rust]
+        pass_filenames: false
+        args: ["--all"]
+    -   id: cargo-clippy
+        name: cargo clippy
+        description: Lint files with clippy.
+        entry: cargo clippy
+        language: system
+        types: [rust]
+        pass_filenames: false
+        args: ["--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
+    -   id: frontend-lint
+        name: frontend lint
+        description: Run eslint on frontend code.
+        entry: bash -c 'cd frontend && pnpm run lint'
+        language: system
+        types_or: [javascript, jsx, ts, tsx]
+        pass_filenames: false
+    -   id: frontend-typecheck
+        name: frontend typecheck
+        description: Run typescript compiler check.
+        entry: bash -c 'cd frontend && pnpm tsc --noEmit'
+        language: system
+        types_or: [ts, tsx]
+        pass_filenames: false
