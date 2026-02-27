@@ -4,15 +4,11 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
-
 from graph import classify_relationship, persist_result, route_after_validation, validate_pair
 from models import Market, RelationshipOutput
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-
-
 
 
 def _make_market(condition_id: str, question: str, description: str = "desc") -> Market:
@@ -211,7 +207,7 @@ class TestPersistResult:
 
         assert result["persisted"] is True
         session.add.assert_called_once()
-        session.commit.assert_called_once()
+        session.commit.assert_awaited_once()
 
     async def test_no_relationship_data(self):
         session = AsyncMock()

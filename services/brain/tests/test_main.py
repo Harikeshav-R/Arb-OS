@@ -48,13 +48,13 @@ async def client(_mock_env):
         patch("main._graph_manager") as mock_graph_mgr,
     ):
         mock_graph_mgr.load_from_db = AsyncMock()
-        mock_graph_mgr.get_stats.return_value = GraphStats(
+        mock_graph_mgr.get_stats = AsyncMock(return_value=GraphStats(
             total_markets=0,
             total_relationships=0,
             total_implies=0,
             total_mutually_exclusive=0,
             connected_components=0,
-        )
+        ))
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
