@@ -34,9 +34,6 @@ impl ContradictionStrategy {
 
         let mut coherent_a = prob_a_bid;
         let mut coherent_b = prob_b_bid;
-        let mut edge_a = Decimal::ZERO;
-        let mut edge_b = Decimal::ZERO;
-
         if combined_weight > Decimal::ZERO {
             // The penalty for A is proportional to the weight of B
             let penalty_a = excess * (weight_b / combined_weight);
@@ -45,10 +42,15 @@ impl ContradictionStrategy {
 
             coherent_a -= penalty_a;
             coherent_b -= penalty_b;
-
-            edge_a = coherent_a - prob_a_bid;
-            edge_b = coherent_b - prob_b_bid;
+        } else {
+            // Fallback to equal weight split if combined_weight <= 0
+            let half_excess = excess / Decimal::from(2);
+            coherent_a -= half_excess;
+            coherent_b -= half_excess;
         }
+
+        let edge_a = coherent_a - prob_a_bid;
+        let edge_b = coherent_b - prob_b_bid;
 
         let gross_profit_per_share = excess;
 
@@ -83,6 +85,8 @@ impl ContradictionStrategy {
             debug!(
                 sum_bids = %sum_bids,
                 excess = %excess,
+                edge_a = %edge_a,
+                edge_b = %edge_b,
                 gross = %total_gross_profit,
                 fees = %total_fees,
                 gas = %estimated_gas_usdc,

@@ -63,4 +63,24 @@ mod tests {
 
         assert_eq!(result, None);
     }
+
+    #[test]
+    fn test_contradiction_profitable_equal_weights() {
+        let asset_a = U256::from(1_u64);
+        let asset_b = U256::from(2_u64);
+
+        // P(A) + P(B) = 0.60 + 0.60 = 1.20 > 1.0 (excess 0.20)
+        let result = ContradictionStrategy::check(
+            asset_a,
+            dec!(0.60),
+            dec!(0.0), // weight_a = 0
+            asset_b,
+            dec!(0.60),
+            dec!(0.0),  // weight_b = 0
+            dec!(0.01), // 1% fee rate
+            dec!(1.0),  // $1 gas
+        );
+
+        assert!(result.is_some());
+    }
 }
