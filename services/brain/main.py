@@ -102,6 +102,8 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    if _gamma_client:
+        await _gamma_client.aclose()
     await close_db()
     logger.info("brain_shutdown")
 
@@ -208,7 +210,11 @@ async def sync_markets(session: AsyncSession = Depends(get_session)):
             created += 1
 
     await session.commit()
-    logger.info("markets_synced", created=created, updated=updated)
+    logger.bind(
+        total_fetched=len(raw_markets),
+        created=created,
+        updated=updated,
+    ).info("markets_synced")
     return {"created": created, "updated": updated, "total_fetched": len(raw_markets)}
 
 
@@ -253,6 +259,11 @@ async def analyze_pair(
         "condition_id_b": request.condition_id_b,
     }
 
+    logger.bind(
+        c_a=request.condition_id_a,
+        c_b=request.condition_id_b,
+    ).info("analyze_request")
+
     result = await compiled_graph.ainvoke(initial_state)
 
     if result.get("error"):
@@ -268,6 +279,9 @@ async def analyze_pair(
     if rel.direction == "B_TO_A":
         parent = request.condition_id_b
         child = request.condition_id_a
+    elif rel.direction == "NONE":
+        # Canonicalize undirected pairs alphabetically
+        parent, child = sorted([request.condition_id_a, request.condition_id_b])
     else:
         parent = request.condition_id_a
         child = request.condition_id_b
@@ -307,10 +321,19 @@ async def scan_markets(
     )
     markets = result.scalars().all()
 
+    logger.bind(
+        active_markets=len(markets),
+        admin=True,
+    ).info("scan_started")
+
     if len(markets) < 2:
         return {"analyzed": 0, "message": "Not enough markets to compare. Sync markets first."}
 
+    # Pre-compile the graph once per request to avoid O(n^2) overhead
+    compiled_graph = build_analysis_graph(settings, session)
+
     analyzed = 0
+    skipped = 0
     errors = 0
 
     for i, market_a in enumerate(markets):
@@ -334,10 +357,14 @@ async def scan_markets(
                 )
             )
             if existing.scalars().first() is not None:
+                skipped += 1
                 continue
 
+            logger.bind(
+                a=market_a.condition_id,
+                b=market_b.condition_id,
+            ).info("scan_pair")
             try:
-                compiled_graph = build_analysis_graph(settings, session)
                 state: AnalysisState = {
                     "condition_id_a": market_a.condition_id,
                     "condition_id_b": market_b.condition_id,
@@ -349,28 +376,34 @@ async def scan_markets(
                     if rel_data and rel_data["relation"] != "INDEPENDENT":
                         direction = rel_data["direction"]
                         if direction == "B_TO_A":
-                            await _graph_manager.add_relationship(
-                                market_b.condition_id,
-                                market_a.condition_id,
-                                rel_data["relation"],
-                                rel_data["confidence"],
-                            )
+                            parent, child = market_b.condition_id, market_a.condition_id
+                        elif direction == "NONE":
+                            parent, child = sorted([market_a.condition_id, market_b.condition_id])
                         else:
-                            await _graph_manager.add_relationship(
-                                market_a.condition_id,
-                                market_b.condition_id,
-                                rel_data["relation"],
-                                rel_data["confidence"],
-                            )
+                            parent, child = market_a.condition_id, market_b.condition_id
+
+                        await _graph_manager.add_relationship(
+                            parent,
+                            child,
+                            rel_data["relation"],
+                            rel_data["confidence"],
+                        )
                     analyzed += 1
                 else:
                     errors += 1
-                    logger.warning("scan_pair_error", error=graph_result["error"])
+                    logger.bind(error=graph_result["error"]).warning("scan_pair_error")
             except Exception:
                 errors += 1
-                logger.exception("scan_pair_exception")
+                logger.bind(
+                    a=market_a.condition_id,
+                    b=market_b.condition_id,
+                ).exception("scan_pair_exception")
 
-    logger.info("scan_complete", analyzed=analyzed, errors=errors)
+    logger.bind(
+        analyzed=analyzed,
+        skipped=skipped,
+        errors=errors,
+    ).info("scan_complete")
     return {"analyzed": analyzed, "errors": errors, "total_markets": len(markets)}
 
 

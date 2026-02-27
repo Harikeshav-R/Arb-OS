@@ -58,7 +58,7 @@ async def validate_pair(state: AnalysisState, *, session: AsyncSession) -> dict:
     cid_b = state["condition_id_b"]
 
     if cid_a == cid_b:
-        logger.warning("validate_pair_identical", condition_id=cid_a)
+        logger.bind(condition_id=cid_a).warning("validate_pair_identical")
         return {"error": "Cannot analyse a market against itself."}
 
     result_a = await session.execute(select(Market).where(Market.condition_id == cid_a))
@@ -72,13 +72,17 @@ async def validate_pair(state: AnalysisState, *, session: AsyncSession) -> dict:
     if market_b is None:
         return {"error": f"Market {cid_b} not found in local DB. Sync markets first."}
 
-    logger.info(
-        "validate_pair_ok",
+    if not market_a.active or market_a.closed:
+        return {"error": f"Market {cid_a} is closed or inactive."}
+    if not market_b.active or market_b.closed:
+        return {"error": f"Market {cid_b} is closed or inactive."}
+
+    logger.bind(
         condition_id_a=cid_a,
         condition_id_b=cid_b,
         question_a=market_a.question,
         question_b=market_b.question,
-    )
+    ).info("validate_pair_ok")
 
     return {
         "market_a": {
@@ -122,11 +126,10 @@ async def classify_relationship(
         HumanMessage(content=user_prompt),
     ]
 
-    logger.info(
-        "classify_invoking_llm",
+    logger.bind(
         question_a=market_a["question"][:80],
         question_b=market_b["question"][:80],
-    )
+    ).info("classify_invoking_llm")
 
     try:
         structured_llm = llm.with_structured_output(RelationshipOutput)
@@ -139,7 +142,7 @@ async def classify_relationship(
             try:
                 result = RelationshipOutput.model_validate_json(raw_response.content)
             except Exception:
-                logger.error("classify_parse_fallback_failed", content=raw_response.content[:200])
+                logger.bind(content=raw_response.content[:200]).error("classify_parse_fallback_failed")
                 return {
                     "relationship": RelationshipOutput(
                         relation="INDEPENDENT",
@@ -161,11 +164,10 @@ async def classify_relationship(
 
     # Enforce confidence threshold
     if result.confidence < confidence_threshold:
-        logger.info(
-            "classify_below_threshold",
+        logger.bind(
             confidence=result.confidence,
             threshold=confidence_threshold,
-        )
+        ).info("classify_below_threshold")
         result = RelationshipOutput(
             relation="INDEPENDENT",
             direction="NONE",
@@ -175,12 +177,11 @@ async def classify_relationship(
                       f"{confidence_threshold:.2f}). Original: {result.reasoning}",
         )
 
-    logger.info(
-        "classify_result",
+    logger.bind(
         relation=result.relation,
         direction=result.direction,
         confidence=result.confidence,
-    )
+    ).info("classify_result")
 
     return {"relationship": result.model_dump()}
 
@@ -230,7 +231,7 @@ async def persist_result(state: AnalysisState, *, session: AsyncSession) -> dict
         existing.reasoning = rel_data["reasoning"]
         existing.is_active = True
         existing.updated_at = now
-        logger.info("persist_updated", parent=parent_cid, child=child_cid)
+        logger.bind(parent=parent_cid, child=child_cid).info("persist_updated")
     else:
         new_rel = Relationship(
             parent_condition_id=parent_cid,
@@ -244,7 +245,7 @@ async def persist_result(state: AnalysisState, *, session: AsyncSession) -> dict
             updated_at=now,
         )
         session.add(new_rel)
-        logger.info("persist_created", parent=parent_cid, child=child_cid)
+        logger.bind(parent=parent_cid, child=child_cid).info("persist_created")
 
     await session.commit()
     return {"persisted": True}

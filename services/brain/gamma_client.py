@@ -19,6 +19,11 @@ class GammaClient:
 
     def __init__(self, base_url: str = "https://gamma-api.polymarket.com") -> None:
         self._base_url = base_url.rstrip("/")
+        self._client = httpx.AsyncClient(timeout=30.0)
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client."""
+        await self._client.aclose()
 
     # ── Public Methods ────────────────────────────────────────────────────────
 
@@ -93,11 +98,10 @@ class GammaClient:
                 break
             offset += page_size
 
-        logger.info(
-            "gamma_markets_fetched",
+        logger.bind(
             total=len(all_markets),
             min_volume=min_volume,
-        )
+        ).info("gamma_markets_fetched")
         return all_markets
 
     # ── Internal ──────────────────────────────────────────────────────────────
@@ -105,16 +109,17 @@ class GammaClient:
     async def _get(self, path: str, params: dict | None = None) -> list[dict] | dict:
         """Perform an HTTP GET and return parsed JSON."""
         url = f"{self._base_url}{path}"
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            logger.debug("gamma_request", method="GET", url=url, params=params)
-            response = await client.get(url, params=params)
+        logger.bind(method="GET", url=url, params=params).debug("gamma_request")
+        response = await self._client.get(url, params=params)
 
-            if response.status_code == 429:
-                logger.warning("gamma_rate_limited", url=url)
+        if response.status_code == 429:
+                logger.bind(url=url).warning("gamma_rate_limited")
                 raise GammaClientError("Gamma API rate limit exceeded (HTTP 429)")
 
-            response.raise_for_status()
-            data = response.json()
-            logger.debug("gamma_response", url=url,
-                         items=len(data) if isinstance(data, list) else 1)
-            return data
+        response.raise_for_status()
+        data = response.json()
+        logger.bind(
+            url=url,
+            items=len(data) if isinstance(data, list) else 1
+        ).debug("gamma_response")
+        return data

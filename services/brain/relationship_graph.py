@@ -44,11 +44,10 @@ class RelationshipGraphManager:
                     confidence=rel.confidence,
                 )
 
-            logger.info(
-                "graph_loaded",
+            logger.bind(
                 nodes=self._graph.number_of_nodes(),
                 edges=self._graph.number_of_edges(),
-            )
+            ).info("graph_loaded")
 
     # ── Mutations ─────────────────────────────────────────────────────────────
 

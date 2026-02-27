@@ -12,28 +12,7 @@ from models import Market, RelationshipOutput
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _make_mock_session(markets: dict[str, Market | None] = None):
-    """Return a mock AsyncSession that returns markets by condition_id."""
-    markets = markets or {}
-    session = AsyncMock()
 
-    async def _execute(stmt):
-        # Extract condition_id from the WHERE clause
-        result = MagicMock()
-        scalars = MagicMock()
-
-        # Try to extract condition_id from various query patterns
-        for cid, market in markets.items():
-            # Simple check — just return the first market if any
-            pass
-
-        # Default: return empty
-        scalars.first.return_value = None
-        result.scalars.return_value = scalars
-        return result
-
-    session.execute = AsyncMock(side_effect=_execute)
-    return session
 
 
 def _make_market(condition_id: str, question: str, description: str = "desc") -> Market:
