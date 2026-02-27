@@ -512,8 +512,9 @@ async def get_brain_state(session: AsyncSession = Depends(get_session)):
                 # End dates from Polymarket are usually ISO8601 strings
                 dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
                 asset_end_timestamps[yes_token] = int(dt.timestamp())
-            except Exception:
-                pass
+            except Exception as e:
+                (logger.bind(condition_id=condition_id, end_date=end_date, error=str(e))
+                 .warning("failed_to_parse_end_date"))
 
     # 2. Implications and Contradictions
     implications_dicts = await _graph_manager.get_all_relationships()
@@ -548,6 +549,14 @@ async def get_brain_state(session: AsyncSession = Depends(get_session)):
     partitions_lists = await _graph_manager.get_partition_groups()
     partitions = []
 
+    # Build a lookup for mutual exclusion confidences
+    me_confidences = {}
+    for rel in implications_dicts:
+        if rel["logic_type"] == "MUTUALLY_EXCLUSIVE":
+            c1, c2 = rel["parent_condition_id"], rel["child_condition_id"]
+            me_confidences[f"{c1}|{c2}"] = rel["confidence"]
+            me_confidences[f"{c2}|{c1}"] = rel["confidence"]
+
     import hashlib
     for i, group in enumerate(partitions_lists):
         if len(group) >= 2:
@@ -558,14 +567,25 @@ async def get_brain_state(session: AsyncSession = Depends(get_session)):
                     group_tokens.append(tok)
 
             if len(group_tokens) >= 2:
+                # Calculate minimum confidence among mutually exclusive edges within the group
+                group_confs = []
+                for j in range(len(group)):
+                    for k in range(j + 1, len(group)):
+                        conf = me_confidences.get(f"{group[j]}|{group[k]}")
+                        if conf is not None:
+                            group_confs.append(conf)
+
+                partition_confidence = min(group_confs) if group_confs else 1.0
+
                 # Hash the sorted assets to get a deterministic B256-like condition ID
-                hash_id = hashlib.sha256("".join(sorted(group_tokens)).encode()).hexdigest()
+                hash_input = "v1_" + "_".join(sorted(group_tokens))
+                hash_id = hashlib.sha256(hash_input.encode()).hexdigest()
                 partitions.append(
                     PartitionMapping(
                         condition_id=f"0x{hash_id}",
-                        expected_outcomes_count=len(group_tokens),
+                        expected_outcomes_count=len(group),
                         assets=group_tokens,
-                        confidence=1.0  # Inherited confidence
+                        confidence=partition_confidence
                     )
                 )
 
