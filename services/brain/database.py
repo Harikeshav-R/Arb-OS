@@ -32,7 +32,7 @@ async def init_db(settings: BrainSettings) -> None:
     async with _engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
-    logger.info("database_initialised", url=async_url.split("@")[-1])
+    logger.bind(url=async_url.split("@")[-1]).info("database_initialised")
 
 
 async def close_db() -> None:

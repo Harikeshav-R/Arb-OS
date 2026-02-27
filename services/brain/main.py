@@ -90,7 +90,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
 
     # Startup
-    logger.info("brain_starting", model=settings.watsonx_model_id)
+    logger.bind(model=settings.watsonx_model_id).info("brain_starting")
     await init_db(settings)
     _gamma_client = GammaClient(base_url=settings.brain_gamma_api_base_url)
 
@@ -479,4 +479,4 @@ async def get_relationships_for_market(
 @app.get("/graph/stats", response_model=GraphStats)
 async def graph_stats():
     """Return high-level statistics about the in-memory relationship graph."""
-    return _graph_manager.get_stats()
+    return await _graph_manager.get_stats()
