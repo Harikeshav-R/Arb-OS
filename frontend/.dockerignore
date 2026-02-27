@@ -1,0 +1,21 @@
+# Version control
+.git
+.gitignore
+
+# Dependencies (reinstalled in container)
+node_modules/
+
+# Build output (rebuilt in container)
+dist/
+
+# IDE
+.vscode
+.idea
+*.swp
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Docs
+*.md

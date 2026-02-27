@@ -1,0 +1,23 @@
+# Version control
+.git
+.gitignore
+
+# Build artifacts
+target/
+
+# IDE
+.vscode
+.idea
+*.swp
+
+# Docker
+docker-compose.yml
+.dockerignore
+**/Dockerfile
+
+# Services not needed for ingestor build
+services/
+frontend/
+
+# Docs
+*.md

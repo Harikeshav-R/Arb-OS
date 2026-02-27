@@ -1,0 +1,28 @@
+# Version control
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.venv
+.mypy_cache
+.ruff_cache
+.pytest_cache
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Tests (not needed in prod image)
+tests/
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Docs
+*.md
