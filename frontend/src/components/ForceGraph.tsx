@@ -9,6 +9,8 @@ export interface GraphNode {
   volume: number;
   x?: number;
   y?: number;
+  vx?: number | null;
+  vy?: number | null;
   fx?: number | null;
   fy?: number | null;
 }
@@ -86,18 +88,36 @@ export default function ForceGraph({ nodes, edges, width = 700, height = 500, an
 
     // Zoom
     const zoom = d3.zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.3, 3])
+      .scaleExtent([0.1, 10]) // Institutional-scale zoom
       .on('zoom', (event) => g.attr('transform', event.transform));
+
     svg.call(zoom);
 
-    const nodesCopy = nodes.map(d => ({ ...d }));
+    // Isolated wheel handling to prevent page scroll
+    const svgNode = svgRef.current;
+    const blockScroll = (e: WheelEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    if (svgNode) {
+      svgNode.addEventListener('wheel', blockScroll, { passive: false });
+    }
+
+    if (!nodes || !edges || !Array.isArray(nodes) || !Array.isArray(edges)) return;
+
+    const nodesCopy = nodes.map(d => {
+      const existing = simulationRef.current?.nodes().find(n => n.id === d.id);
+      return existing ? { ...d, x: existing.x, y: existing.y, vx: existing.vx, vy: existing.vy } : { ...d };
+    });
     const edgesCopy = edges.map(d => ({ ...d }));
 
     const simulation = d3.forceSimulation<GraphNode>(nodesCopy)
       .force('link', d3.forceLink<GraphNode, GraphEdge>(edgesCopy).id((d) => d.id).distance(120))
       .force('charge', d3.forceManyBody().strength(-300))
       .force('center', d3.forceCenter(width / 2, height / 2))
-      .force('collision', d3.forceCollide().radius(50));
+      .force('collision', d3.forceCollide().radius(50))
+      .alphaDecay(0.08) // Fast stabilization for dense graphs
+      .velocityDecay(0.5); // Less sliding
 
     simulationRef.current = simulation;
 
@@ -142,29 +162,29 @@ export default function ForceGraph({ nodes, edges, width = 700, height = 500, an
         }));
 
     node.append('rect')
-      .attr('width', 120)
-      .attr('height', 44)
-      .attr('x', -60)
-      .attr('y', -22)
-      .attr('rx', 6)
+      .attr('width', 100)
+      .attr('height', 38)
+      .attr('x', -50)
+      .attr('y', -19)
+      .attr('rx', 5)
       .attr('fill', '#16213E')
       .attr('stroke', d => getNodeColor(d.status))
       .attr('stroke-width', d => d.status === 'arb' ? 2 : 1);
 
     node.append('text')
       .attr('fill', '#F8FAFC')
-      .attr('font-size', '10px')
+      .attr('font-size', '9px')
       .attr('font-family', 'Inter')
       .attr('text-anchor', 'middle')
       .attr('y', -4)
-      .text(d => d.label.length > 18 ? d.label.slice(0, 18) + '…' : d.label);
+      .text(d => d.label.length > 16 ? d.label.slice(0, 16) + '…' : d.label);
 
     node.append('text')
       .attr('fill', '#00D4AA')
-      .attr('font-size', '10px')
+      .attr('font-size', '9px')
       .attr('font-family', 'JetBrains Mono')
       .attr('text-anchor', 'middle')
-      .attr('y', 12)
+      .attr('y', 10)
       .text(d => `YES: ${d.price.toFixed(2)}`);
 
     // Tooltip
@@ -198,14 +218,18 @@ export default function ForceGraph({ nodes, edges, width = 700, height = 500, an
             .duration(800)
             .attr('stroke-width', 2);
         }
-      }, 3000);
+      }, 1500);
       return () => {
+        if (svgNode) svgNode.removeEventListener('wheel', blockScroll);
         clearInterval(flashInterval);
         simulation.stop();
       };
     }
 
-    return () => { simulation.stop(); };
+    return () => {
+      if (svgNode) svgNode.removeEventListener('wheel', blockScroll);
+      simulation.stop();
+    };
   }, [nodes, edges, width, height, animated, getNodeColor, getEdgeStyle]);
 
   return (

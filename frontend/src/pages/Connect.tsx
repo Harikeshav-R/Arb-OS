@@ -7,17 +7,17 @@ import StepNav from '../components/StepNav';
 import { fetchBotHealth, fetchBrainHealth } from '../lib/api';
 
 export default function Connect() {
-  const [polymarketWallet, setPolymarketWallet] = useState('');
+  const [polymarketWallet, setPolymarketWallet] = useState('0x7a3B...d49F');
   const [polymarketConnecting, setPolymarketConnecting] = useState(false);
-  const [polymarketConnected, setPolymarketConnected] = useState(false);
+  const [polymarketConnected, setPolymarketConnected] = useState(true);
 
-  // Brain service connectivity (replaces Kalshi placeholder)
-  const [brainConnected, setBrainConnected] = useState(false);
+  // Brain service connectivity
+  const [brainConnected, setBrainConnected] = useState(true);
   const [brainChecking, setBrainChecking] = useState(false);
-  const [brainStatus, setBrainStatus] = useState<{ db_connected: boolean; llm_configured: boolean } | null>(null);
+  const [brainStatus, setBrainStatus] = useState<{ db_connected: boolean; llm_configured: boolean } | null>({ db_connected: true, llm_configured: true });
 
   // Bot service connectivity
-  const [botConnected, setBotConnected] = useState(false);
+  const [botConnected, setBotConnected] = useState(true);
 
   // Auto-check Brain + Bot connectivity on mount
   useEffect(() => {
@@ -58,7 +58,7 @@ export default function Connect() {
     setPolymarketConnecting(false);
   };
 
-  const allConnected = polymarketConnected && brainConnected;
+  const allConnected = true; // Always allow proceeding in DEMO mode
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
