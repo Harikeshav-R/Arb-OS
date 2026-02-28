@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import Navbar from '../components/Navbar';
 import ForceGraph, { DEFAULT_NODES, DEFAULT_EDGES } from '../components/ForceGraph';
+import { useQuery } from '@tanstack/react-query';
 
 interface TradeRow {
   time: string;
@@ -14,19 +15,39 @@ interface TradeRow {
   status: 'FILLED' | 'SKIPPED' | 'INFO';
 }
 
-const INITIAL_TRADES: TradeRow[] = [
-  { time: '14:23:07', type: 'IMPLICATION', marketA: 'Fed Cut June (SELL 50 @ 60¢)', marketB: 'Fed Cut 2026 (BUY 50 @ 55¢)', profit: '+$2.47', status: 'FILLED' },
-  { time: '14:21:44', type: 'PARTITION', marketA: 'BTC >$100K Q1 (SELL 30 @ 22¢)', marketB: 'BTC >$100K Q2 (SELL 30 @ 18¢)', profit: '+$1.83', status: 'FILLED' },
-  { time: '14:19:02', type: 'IMPLICATION', marketA: 'Trump Wins Iowa', marketB: 'Trump Wins Nom.', profit: '+$3.12', status: 'FILLED' },
-  { time: '14:15:33', type: 'ALERT', marketA: 'Spread detected, liquidity too thin', marketB: '—', profit: '—', status: 'SKIPPED' },
-  { time: '14:12:01', type: 'SYSTEM', marketA: 'WebSocket reconnected to Polymarket', marketB: '—', profit: '—', status: 'INFO' },
-];
+interface WsSnapshot {
+  mode: string;
+  cumulative_pnl: string;
+  signals_executed: number;
+  uptime_secs: number;
+  positions: WsPosition[];
+  recent_trades: WsExecutionReport[];
+}
 
-const NEW_TRADES: TradeRow[] = [
-  { time: '', type: 'IMPLICATION', marketA: 'Fed Cut June (SELL 25 @ 61¢)', marketB: 'Fed Cut 2026 (BUY 25 @ 56¢)', profit: '+$1.24', status: 'FILLED' },
-  { time: '', type: 'PARTITION', marketA: 'Fed Cut Q2 (SELL 20 @ 31¢)', marketB: 'No Rate Cut (BUY 20 @ 38¢)', profit: '+$0.89', status: 'FILLED' },
-  { time: '', type: 'IMPLICATION', marketA: 'Trump Iowa (SELL 15 @ 73¢)', marketB: 'Trump Nom. (BUY 15 @ 80¢)', profit: '+$1.55', status: 'FILLED' },
-];
+interface WsPosition {
+  asset_id: string;
+  side: string;
+  size: string;
+  entry_price: string;
+  opened_at: string;
+}
+
+interface WsExecutionReport {
+  strategy: string;
+  success: boolean;
+  pnl_usdc: string;
+  legs: number;
+  executed_at: string;
+  fill_details: WsFillDetail[];
+}
+
+interface WsFillDetail {
+  asset_id: string;
+  side: string;
+  size: string;
+  price: string;
+  filled: boolean;
+}
 
 function getTimeStr(): string {
   const now = new Date();
@@ -35,50 +56,86 @@ function getTimeStr(): string {
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const [pnl, setPnl] = useState(47.82);
-  const [trades, setTrades] = useState<TradeRow[]>(INITIAL_TRADES);
+  const { data: graphData } = useQuery({
+    queryKey: ['graph-vis'],
+    queryFn: async () => {
+      const res = await fetch('http://localhost:8000/graph/vis');
+      if (!res.ok) throw new Error('Failed to fetch graph');
+      return res.json();
+    },
+    refetchInterval: 5000,
+  });
+  const [pnl, setPnl] = useState(0);
+  const [trades, setTrades] = useState<TradeRow[]>([]);
   const [latency, setLatency] = useState(14);
+  const [wsStatus, setWsStatus] = useState<'Connecting' | 'Live' | 'Disconnected'>('Connecting');
   const [fedJunePrice, setFedJunePrice] = useState(0.58);
   const [fedPrice, setFedPrice] = useState(0.56);
-  const tradeIdx = useRef(0);
   const [paused, setPaused] = useState(false);
 
-  // P&L ticker
+  // WebSocket Integration
   useEffect(() => {
     if (paused) return;
-    const interval = setInterval(() => {
-      setPnl(prev => +(prev + Math.random() * 0.14 + 0.01).toFixed(2));
-    }, Math.random() * 5000 + 3000);
-    return () => clearInterval(interval);
-  }, [paused]);
 
-  // Latency fluctuation
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setLatency(Math.floor(12 + Math.random() * 6));
-    }, 2000);
-    return () => clearInterval(interval);
-  }, []);
+    setWsStatus('Connecting');
+    const ws = new WebSocket('ws://localhost:8001/ws');
 
-  // Price ticks
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setFedJunePrice(p => +(p + (Math.random() - 0.5) * 0.02).toFixed(2));
-      setFedPrice(p => +(p + (Math.random() - 0.5) * 0.02).toFixed(2));
-    }, 3000);
-    return () => clearInterval(interval);
-  }, []);
+    ws.onopen = () => {
+      setWsStatus('Live');
+      toast.success('Connected to ArbOS Orchestrator');
+    };
 
-  // New trades
-  useEffect(() => {
-    if (paused) return;
-    const interval = setInterval(() => {
-      const idx = tradeIdx.current % NEW_TRADES.length;
-      const trade = { ...NEW_TRADES[idx], time: getTimeStr() };
-      setTrades(prev => [trade, ...prev].slice(0, 20));
-      tradeIdx.current++;
-    }, 6000);
-    return () => clearInterval(interval);
+    ws.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.type === 'SNAPSHOT') {
+          const data = payload.data as WsSnapshot;
+          setPnl(parseFloat(data.cumulative_pnl));
+
+          // Map initial trades
+          const initialTrades = data.recent_trades.map((t: WsExecutionReport) => {
+            const timeStr = new Date(t.executed_at).toTimeString().slice(0, 8);
+            return {
+              time: timeStr,
+              type: t.strategy,
+              marketA: t.fill_details?.[0] ? `${t.fill_details[0].side} ${t.fill_details[0].size}` : '—',
+              marketB: t.fill_details?.[1] ? `${t.fill_details[1].side} ${t.fill_details[1].size}` : '—',
+              profit: `+$${parseFloat(t.pnl_usdc).toFixed(2)}`,
+              status: t.success ? 'FILLED' : 'SKIPPED'
+            } as TradeRow;
+          });
+          setTrades(initialTrades);
+        } else if (payload.type === 'EXECUTION_REPORT') {
+          const t = payload.data as WsExecutionReport;
+          const timeStr = new Date(t.executed_at).toTimeString().slice(0, 8);
+
+          const newTrade: TradeRow = {
+            time: timeStr,
+            type: t.strategy,
+            marketA: t.fill_details?.[0] ? `${t.fill_details[0].side} ${t.fill_details[0].size}` : '—',
+            marketB: t.fill_details?.[1] ? `${t.fill_details[1].side} ${t.fill_details[1].size}` : '—',
+            profit: `+$${parseFloat(t.pnl_usdc).toFixed(2)}`,
+            status: t.success ? 'FILLED' : 'SKIPPED'
+          };
+
+          setTrades(prev => [newTrade, ...prev].slice(0, 50));
+          if (t.success) {
+            setPnl(prev => prev + parseFloat(t.pnl_usdc));
+            toast.success(`Arb executed! +$${parseFloat(t.pnl_usdc).toFixed(2)}`);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to parse WS message', err);
+      }
+    };
+
+    ws.onclose = () => {
+      setWsStatus('Disconnected');
+    };
+
+    return () => {
+      ws.close();
+    };
   }, [paused]);
 
   const handleComingSoon = useCallback((label: string) => {
@@ -191,14 +248,34 @@ export default function Dashboard() {
             </div>
 
             {/* Live Graph */}
-            <div className="rounded-lg border border-border bg-card card-shadow overflow-hidden" style={{ minHeight: 400 }}>
-              <ForceGraph
-                nodes={DEFAULT_NODES}
-                edges={DEFAULT_EDGES}
-                width={700}
-                height={450}
-                animated
-              />
+            <div className="rounded-lg border border-border bg-card card-shadow overflow-hidden flex flex-col items-center justify-center relative" style={{ minHeight: 400 }}>
+              {graphData ? (
+                <ForceGraph
+                  nodes={graphData.nodes}
+                  edges={graphData.edges}
+                  width={700}
+                  height={450}
+                  animated
+                />
+              ) : (
+                <ForceGraph
+                  nodes={DEFAULT_NODES}
+                  edges={DEFAULT_EDGES}
+                  width={700}
+                  height={450}
+                  animated
+                />
+              )}
+              {graphData && (
+                <div className="absolute top-2 right-2 flex gap-2">
+                  <div className="px-2 py-0.5 rounded text-[10px] font-mono bg-primary/10 text-primary border border-primary/20">
+                    Live Nodes: {graphData.nodes.length}
+                  </div>
+                  <div className="px-2 py-0.5 rounded text-[10px] font-mono bg-secondary/10 text-secondary border border-secondary/20">
+                    Live Edges: {graphData.edges.length}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -221,10 +298,9 @@ export default function Dashboard() {
                   {trades.map((t, i) => (
                     <tr
                       key={`${t.time}-${i}`}
-                      className={`border-b border-border/50 animate-slide-down ${
-                        t.status === 'FILLED' ? 'text-foreground' :
+                      className={`border-b border-border/50 animate-slide-down ${t.status === 'FILLED' ? 'text-foreground' :
                         t.status === 'SKIPPED' ? 'text-warning' : 'text-muted-foreground'
-                      }`}
+                        }`}
                     >
                       <td className="py-2 pr-3">{t.time}</td>
                       <td className="py-2 pr-3">{t.type}</td>
@@ -279,7 +355,7 @@ export default function Dashboard() {
               <div className="space-y-2 font-mono text-xs">
                 {[
                   ['Engine Latency', `${latency}ms`, '⚡'],
-                  ['WebSocket', 'Live', '🟢'],
+                  ['WebSocket', wsStatus, wsStatus === 'Live' ? '🟢' : '🔴'],
                   ['Gamma API', 'OK', '🟢'],
                   ['Brain (WatsonX)', 'OK', '🟢'],
                   ['Polygon Gas', '$0.003', ''],

@@ -14,8 +14,8 @@ export interface GraphNode {
 }
 
 export interface GraphEdge {
-  source: string;
-  target: string;
+  source: string | GraphNode;
+  target: string | GraphNode;
   type: 'IMPLIES' | 'EXCLUSIVE' | 'PARTITION';
   label?: string;
   confidence: number;
@@ -83,7 +83,7 @@ export default function ForceGraph({ nodes, edges, width = 700, height = 500, an
     svg.selectAll('*').remove();
 
     const defs = svg.append('defs');
-    
+
     // Arrow marker
     defs.append('marker')
       .attr('id', 'arrow')
@@ -116,8 +116,8 @@ export default function ForceGraph({ nodes, edges, width = 700, height = 500, an
     const nodesCopy = nodes.map(d => ({ ...d }));
     const edgesCopy = edges.map(d => ({ ...d }));
 
-    const simulation = d3.forceSimulation(nodesCopy)
-      .force('link', d3.forceLink(edgesCopy).id((d: any) => d.id).distance(120))
+    const simulation = d3.forceSimulation<GraphNode>(nodesCopy)
+      .force('link', d3.forceLink<GraphNode, GraphEdge>(edgesCopy).id((d) => d.id).distance(120))
       .force('charge', d3.forceManyBody().strength(-300))
       .force('center', d3.forceCenter(width / 2, height / 2))
       .force('collision', d3.forceCollide().radius(50));
@@ -129,22 +129,22 @@ export default function ForceGraph({ nodes, edges, width = 700, height = 500, an
       .selectAll('line')
       .data(edgesCopy)
       .join('line')
-      .attr('stroke', (d: any) => d.isArb ? '#00FF88' : d.type === 'IMPLIES' ? '#FBBF24' : '#4B5563')
-      .attr('stroke-width', (d: any) => d.isArb ? 2 : 1)
-      .attr('stroke-dasharray', (d: any) => getEdgeStyle(d.type))
-      .attr('marker-end', (d: any) => d.type === 'IMPLIES' ? 'url(#arrow)' : '')
-      .attr('filter', (d: any) => d.isArb ? 'url(#glow)' : '');
+      .attr('stroke', (d) => d.isArb ? '#00FF88' : d.type === 'IMPLIES' ? '#FBBF24' : '#4B5563')
+      .attr('stroke-width', (d) => d.isArb ? 2 : 1)
+      .attr('stroke-dasharray', (d) => getEdgeStyle(d.type))
+      .attr('marker-end', (d) => d.type === 'IMPLIES' ? 'url(#arrow)' : '')
+      .attr('filter', (d) => d.isArb ? 'url(#glow)' : '');
 
     // Edge labels
     const edgeLabel = g.append('g')
       .selectAll('text')
-      .data(edgesCopy.filter((d: any) => d.label))
+      .data(edgesCopy.filter((d) => d.label))
       .join('text')
       .attr('font-family', 'JetBrains Mono')
       .attr('font-size', '9px')
       .attr('fill', '#94A3B8')
       .attr('text-anchor', 'middle')
-      .text((d: any) => d.label);
+      .text((d) => d.label ?? '');
 
     // Nodes
     const node = g.append('g')
@@ -162,7 +162,7 @@ export default function ForceGraph({ nodes, edges, width = 700, height = 500, an
         .on('end', (event, d) => {
           if (!event.active) simulation.alphaTarget(0);
           d.fx = null; d.fy = null;
-        }) as any);
+        }));
 
     node.append('rect')
       .attr('width', 120)
@@ -192,18 +192,18 @@ export default function ForceGraph({ nodes, edges, width = 700, height = 500, an
 
     // Tooltip
     node.append('title')
-      .text(d => `${d.label}\nPrice: ${d.price.toFixed(2)}\nVolume: $${(d.volume/1000).toFixed(0)}K\nStatus: ${d.status}`);
+      .text(d => `${d.label}\nPrice: ${d.price.toFixed(2)}\nVolume: $${(d.volume / 1000).toFixed(0)}K\nStatus: ${d.status}`);
 
     simulation.on('tick', () => {
       link
-        .attr('x1', (d: any) => d.source.x)
-        .attr('y1', (d: any) => d.source.y)
-        .attr('x2', (d: any) => d.target.x)
-        .attr('y2', (d: any) => d.target.y);
+        .attr('x1', (d) => (d.source as GraphNode).x!)
+        .attr('y1', (d) => (d.source as GraphNode).y!)
+        .attr('x2', (d) => (d.target as GraphNode).x!)
+        .attr('y2', (d) => (d.target as GraphNode).y!);
 
       edgeLabel
-        .attr('x', (d: any) => (d.source.x + d.target.x) / 2)
-        .attr('y', (d: any) => (d.source.y + d.target.y) / 2 - 6);
+        .attr('x', (d) => ((d.source as GraphNode).x! + (d.target as GraphNode).x!) / 2)
+        .attr('y', (d) => ((d.source as GraphNode).y! + (d.target as GraphNode).y!) / 2 - 6);
 
       node.attr('transform', d => `translate(${d.x},${d.y})`);
     });
@@ -211,10 +211,10 @@ export default function ForceGraph({ nodes, edges, width = 700, height = 500, an
     // Flash arb edges periodically
     if (animated) {
       const flashInterval = setInterval(() => {
-        const arbEdges = edgesCopy.filter((d: any) => d.isArb);
+        const arbEdges = edgesCopy.filter((d) => d.isArb);
         if (arbEdges.length > 0) {
           const idx = Math.floor(Math.random() * arbEdges.length);
-          link.filter((_: any, i: number) => edgesCopy[i] === arbEdges[idx])
+          link.filter((_, i) => edgesCopy[i] === arbEdges[idx])
             .attr('stroke', '#00FF88')
             .attr('stroke-width', 4)
             .transition()
