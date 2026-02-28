@@ -154,3 +154,23 @@ class RelationshipGraphManager:
                 }
                 for u, v, data in self._graph.edges(data=True)
             ]
+
+    async def get_visualization_data(self) -> dict:
+        """Return raw graph data for frontend ForceGraph visualization.
+
+        Returns a dict with:
+        - ``node_ids``: list of all condition_id strings in the graph
+        - ``edges``: list of dicts with source, target, logic_type, confidence
+        """
+        async with self._lock:
+            node_ids = list(self._graph.nodes())
+            edges = [
+                {
+                    "source": u,
+                    "target": v,
+                    "logic_type": data.get("logic_type", "IMPLIES"),
+                    "confidence": data.get("confidence", 0.0),
+                }
+                for u, v, data in self._graph.edges(data=True)
+            ]
+            return {"node_ids": node_ids, "edges": edges}

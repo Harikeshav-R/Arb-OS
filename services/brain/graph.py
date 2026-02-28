@@ -315,3 +315,236 @@ def build_analysis_graph(
     builder.add_edge("persist_result", END)
 
     return builder.compile()
+
+
+# ── Chat Graph ────────────────────────────────────────────────────────────────
+
+
+class ChatState(TypedDict, total=False):
+    """Shared state flowing through the chat graph."""
+
+    # Inputs
+    message: str
+    history: list[dict]
+
+    # Populated during graph execution
+    intent: str | None
+    search_keywords: list[str]
+    context_data: str | None  # Stringified context for response generation
+    markets_found: int
+    graph_updated: bool
+    response: str | None
+    error: str | None
+
+
+async def parse_intent(
+    state: ChatState,
+    *,
+    llm: ChatWatsonx,
+) -> dict:
+    """Classify user intent from their chat message."""
+    from prompts import CHAT_INTENT_PROMPT
+
+    user_message = state["message"]
+    intent_prompt = CHAT_INTENT_PROMPT.format(message=user_message)
+
+    try:
+        from models import ChatIntent as ChatIntentModel
+
+        structured_llm = llm.with_structured_output(ChatIntentModel)
+        result = await structured_llm.ainvoke([
+            SystemMessage(content="Classify the user's intent."),
+            HumanMessage(content=intent_prompt),
+        ])
+        logger.bind(
+            intent=result.intent,
+            keywords=result.search_keywords,
+        ).info("chat_intent_parsed")
+        return {
+            "intent": result.intent,
+            "search_keywords": result.search_keywords,
+        }
+    except Exception:
+        logger.exception("chat_intent_parse_failed")
+        # Fallback: treat as general question
+        return {
+            "intent": "GENERAL_QUESTION",
+            "search_keywords": [],
+        }
+
+
+async def execute_action(
+    state: ChatState,
+    *,
+    session: AsyncSession,
+    graph_manager: object,
+) -> dict:
+    """Execute the action based on classified intent."""
+    intent = state.get("intent", "GENERAL_QUESTION")
+    keywords = state.get("search_keywords", [])
+
+    if intent == "SEARCH_MARKETS":
+        # Search for markets matching keywords
+        keyword_filter = " ".join(keywords).lower() if keywords else ""
+        result = await session.execute(
+            select(Market)
+            .where(Market.active.is_(True), Market.closed.is_(False))
+            .order_by(Market.volume.desc())
+            .limit(50)
+        )
+        all_markets = result.scalars().all()
+
+        # Filter locally by keywords for flexible matching
+        matched = []
+        for m in all_markets:
+            searchable = f"{m.question} {m.description or ''} {m.event_title or ''}".lower()
+            if not keyword_filter or any(kw.lower() in searchable for kw in keywords):
+                matched.append(m)
+
+        if not matched:
+            matched = all_markets[:10]  # Fallback to top markets
+
+        market_summaries = []
+        for m in matched[:15]:
+            market_summaries.append(
+                f"- {m.question} (vol: ${m.volume:,.0f}, id: {m.condition_id[:12]}…)"
+            )
+
+        context = f"Found {len(matched)} markets"
+        if keywords:
+            context += f" matching '{' '.join(keywords)}'"
+        context += ":\n" + "\n".join(market_summaries)
+
+        return {
+            "context_data": context,
+            "markets_found": len(matched),
+        }
+
+    elif intent == "SCAN_RELATIONSHIPS":
+        # Return current scan info + relationship summary
+        stats = await graph_manager.get_stats()
+        rels = await graph_manager.get_all_relationships()
+
+        rel_summaries = []
+        for r in rels[:10]:
+            rel_summaries.append(
+                f"- {r['parent_condition_id'][:12]}… → "
+                f"{r['child_condition_id'][:12]}… "
+                f"({r['logic_type']}, conf: {r['confidence']:.2f})"
+            )
+
+        context = (
+            f"Graph has {stats.total_markets} markets, "
+            f"{stats.total_relationships} relationships "
+            f"({stats.total_implies} IMPLIES, "
+            f"{stats.total_mutually_exclusive} MUTUALLY_EXCLUSIVE), "
+            f"{stats.connected_components} connected components.\n"
+        )
+        if rel_summaries:
+            context += "Recent relationships:\n" + "\n".join(rel_summaries)
+        else:
+            context += "No relationships discovered yet. Trigger a scan to find some."
+
+        return {
+            "context_data": context,
+            "graph_updated": False,
+        }
+
+    elif intent == "GRAPH_STATUS":
+        stats = await graph_manager.get_stats()
+        context = (
+            f"Current graph status:\n"
+            f"- Total markets tracked: {stats.total_markets}\n"
+            f"- Total relationships: {stats.total_relationships}\n"
+            f"- Implication edges: {stats.total_implies}\n"
+            f"- Mutual exclusion edges: {stats.total_mutually_exclusive}\n"
+            f"- Connected components: {stats.connected_components}"
+        )
+        return {"context_data": context}
+
+    else:
+        # GENERAL_QUESTION — no action needed, LLM will answer directly
+        return {"context_data": None}
+
+
+async def generate_response(
+    state: ChatState,
+    *,
+    llm: ChatWatsonx,
+) -> dict:
+    """Generate a natural-language response using the LLM with context data."""
+    from prompts import CHAT_SYSTEM_PROMPT
+
+    messages = [SystemMessage(content=CHAT_SYSTEM_PROMPT)]
+
+    # Include conversation history
+    for msg in state.get("history", []):
+        if msg.get("role") == "user":
+            messages.append(HumanMessage(content=msg["text"]))
+        elif msg.get("role") == "ai":
+            from langchain_core.messages import AIMessage
+            messages.append(AIMessage(content=msg["text"]))
+
+    # Build contextual user message
+    user_text = state["message"]
+    context = state.get("context_data")
+    if context:
+        user_text += f"\n\n[System context — use this data in your response]:\n{context}"
+
+    messages.append(HumanMessage(content=user_text))
+
+    try:
+        response = await llm.ainvoke(messages)
+        logger.bind(intent=state.get("intent")).info("chat_response_generated")
+        return {"response": response.content}
+    except Exception:
+        logger.exception("chat_response_generation_failed")
+        return {
+            "response": "I encountered an error generating a response. "
+                        "Please check that the WatsonX API is configured correctly.",
+            "error": "LLM response generation failed",
+        }
+
+
+def build_chat_graph(
+    settings: BrainSettings,
+    session: AsyncSession,
+    graph_manager: object,
+) -> CompiledStateGraph:
+    """Construct and compile the chat LangGraph.
+
+    Pipeline: START → parse_intent → execute_action → generate_response → END
+    """
+    llm = ChatWatsonx(
+        model_id=settings.watsonx_model_id,
+        url=settings.watsonx_url,
+        project_id=settings.watsonx_project_id,
+        apikey=settings.watsonx_apikey.get_secret_value() if settings.watsonx_apikey else None,
+        params={
+            "temperature": 0.3,  # Slightly creative for chat
+            "max_tokens": settings.brain_llm_max_tokens,
+        },
+    )
+
+    async def _parse_intent(state: ChatState) -> dict:
+        return await parse_intent(state, llm=llm)
+
+    async def _execute_action(state: ChatState) -> dict:
+        return await execute_action(
+            state, session=session, graph_manager=graph_manager,
+        )
+
+    async def _generate_response(state: ChatState) -> dict:
+        return await generate_response(state, llm=llm)
+
+    builder = StateGraph(ChatState)
+    builder.add_node("parse_intent", _parse_intent)
+    builder.add_node("execute_action", _execute_action)
+    builder.add_node("generate_response", _generate_response)
+
+    builder.add_edge(START, "parse_intent")
+    builder.add_edge("parse_intent", "execute_action")
+    builder.add_edge("execute_action", "generate_response")
+    builder.add_edge("generate_response", END)
+
+    return builder.compile()

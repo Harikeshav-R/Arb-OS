@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Security
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from loguru import logger
 from sqlalchemy import func, select
@@ -24,12 +25,17 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config import get_settings
 from database import close_db, get_session, init_db
 from gamma_client import GammaClient
-from graph import AnalysisState, build_analysis_graph
+from graph import AnalysisState, build_analysis_graph, build_chat_graph, ChatState
 from models import (
     AnalyzePairRequest,
     AnalyzePairResponse,
     BrainStatePayload,
+    ChatRequest,
+    ChatResponse,
     GraphStats,
+    GraphNode,
+    GraphEdge,
+    GraphVisResponse,
     HealthResponse,
     ImplicationMapping,
     PartitionMapping,
@@ -136,6 +142,18 @@ app = FastAPI(
     description="AI-driven logical relationship discovery for Polymarket",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://frontend:80",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -559,6 +577,93 @@ async def get_relationships_for_market(
 async def graph_stats():
     """Return high-level statistics about the in-memory relationship graph."""
     return await _graph_manager.get_stats()
+
+
+@app.get("/graph/vis", response_model=GraphVisResponse)
+async def graph_vis(session: AsyncSession = Depends(get_session)):
+    """Return ForceGraph-compatible visualization data for the frontend."""
+    vis_data = await _graph_manager.get_visualization_data()
+    node_ids = vis_data["node_ids"]
+    raw_edges = vis_data["edges"]
+
+    # Fetch market metadata for all nodes
+    nodes: list[GraphNode] = []
+    if node_ids:
+        result = await session.execute(
+            select(Market).where(Market.condition_id.in_(node_ids))
+        )
+        markets_by_cid = {m.condition_id: m for m in result.scalars().all()}
+
+        for cid in node_ids:
+            m = markets_by_cid.get(cid)
+            if m:
+                nodes.append(GraphNode(
+                    id=cid,
+                    label=m.question[:50] if m.question else cid[:12],
+                    price=0.50,  # Placeholder: real price from ingestor
+                    status="normal",
+                    volume=m.volume,
+                ))
+            else:
+                nodes.append(GraphNode(
+                    id=cid,
+                    label=cid[:16],
+                    price=0.50,
+                    status="illiquid",
+                    volume=0,
+                ))
+
+    # Build edges with type mapping
+    type_map = {
+        "IMPLIES": "IMPLIES",
+        "MUTUALLY_EXCLUSIVE": "EXCLUSIVE",
+        "PARTITION": "PARTITION",
+    }
+    edges: list[GraphEdge] = [
+        GraphEdge(
+            source=e["source"],
+            target=e["target"],
+            type=type_map.get(e["logic_type"], "IMPLIES"),
+            confidence=e["confidence"],
+            isArb=False,
+        )
+        for e in raw_edges
+        if e["source"] in {n.id for n in nodes} and e["target"] in {n.id for n in nodes}
+    ]
+
+    return GraphVisResponse(nodes=nodes, edges=edges)
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(
+    request: ChatRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    """Conversational endpoint powered by a LangGraph chat workflow.
+
+    Parses intent, searches markets / queries graph, and generates
+    a natural-language response using the IBM WatsonX LLM.
+    """
+    settings = get_settings()
+    compiled_chat = build_chat_graph(settings, session, _graph_manager)
+
+    initial_state: ChatState = {
+        "message": request.message,
+        "history": [msg.model_dump() for msg in request.history],
+    }
+
+    logger.bind(message=request.message[:80]).info("chat_request")
+
+    try:
+        result = await compiled_chat.ainvoke(initial_state)
+        return ChatResponse(
+            response=result.get("response", "No response generated."),
+            graph_updated=result.get("graph_updated", False),
+            markets_found=result.get("markets_found", 0),
+        )
+    except Exception:
+        logger.exception("chat_endpoint_failed")
+        raise HTTPException(status_code=500, detail="Chat processing failed")
 
 
 # ── Graph Sync Endpoint ────────────────────────────────────────────────────────

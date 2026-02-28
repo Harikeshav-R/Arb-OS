@@ -193,3 +193,32 @@ class BrainStatePayload(BaseModel):
     partitions: list[PartitionMapping]
     contradictions: list[ContradictionMapping]
     asset_end_timestamps: dict[str, int]
+
+
+# ── Chat Models ──────────────────────────────────────────────────────────────
+
+
+class ChatMessage(BaseModel):
+    """A single chat message in a conversation."""
+    role: Literal["user", "ai"]
+    text: str
+
+
+class ChatRequest(BaseModel):
+    """Request body for the /chat endpoint."""
+    message: str = Field(min_length=1, max_length=2000)
+    history: list[ChatMessage] = Field(default_factory=list)
+
+
+class ChatIntent(BaseModel):
+    """LLM-classified intent for routing in the chat LangGraph workflow."""
+    intent: Literal["SEARCH_MARKETS", "SCAN_RELATIONSHIPS", "GRAPH_STATUS", "GENERAL_QUESTION"]
+    search_keywords: list[str] = Field(default_factory=list)
+    reasoning: str
+
+
+class ChatResponse(BaseModel):
+    """Response body for the /chat endpoint."""
+    response: str
+    graph_updated: bool = False
+    markets_found: int = 0
