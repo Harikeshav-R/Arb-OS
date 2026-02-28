@@ -56,8 +56,7 @@ db: ## Connect to the Postgres database using psql locally
 db-shell: ## Open psql inside the postgres container
 	docker compose exec postgres psql -U postgres -d arbos
 
-redis-cli: ## Open redis-cli inside the redis container
-	docker compose exec redis redis-cli
+
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 
