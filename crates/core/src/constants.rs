@@ -23,3 +23,7 @@ pub const CMD_CHANNEL_BUFFER: usize = 32;
 pub const STATE_CHANNEL_BUFFER: usize = 100;
 pub const STREAM_ERROR_RETRY_DELAY_SECS: u64 = 2;
 pub const CONNECTION_RETRY_DELAY_SECS: u64 = 5;
+
+pub const EXECUTOR_RATE_LIMIT_PER_SEC: u32 = 10;
+pub const SIGNAL_CHANNEL_BUFFER: usize = 64;
+pub const REPORT_CHANNEL_BUFFER: usize = 64;
