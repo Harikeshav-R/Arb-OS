@@ -132,6 +132,31 @@ class GraphStats(BaseModel):
     connected_components: int
 
 
+class GraphNode(BaseModel):
+    """A node representation tailored for frontend graph rendering."""
+    id: str
+    label: str
+    price: float
+    status: Literal["arb", "normal", "illiquid"]
+    volume: float
+
+
+class GraphEdge(BaseModel):
+    """An edge representation tailored for frontend graph rendering."""
+    source: str
+    target: str
+    type: Literal["IMPLIES", "EXCLUSIVE", "PARTITION"]
+    confidence: float
+    isArb: bool | None = None
+    label: str | None = None
+
+
+class GraphVisResponse(BaseModel):
+    """Response containing nodes and edges for visualizing the logic graph."""
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
+
+
 class HealthResponse(BaseModel):
     """Response body for the /health endpoint."""
 
