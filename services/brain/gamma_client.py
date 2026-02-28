@@ -59,6 +59,7 @@ class GammaClient:
             closed: bool = False,
             limit: int = 100,
             offset: int = 0,
+            query: str | None = None,
     ) -> list[dict]:
         """Return markets matching the given filters."""
         params: dict[str, str | int | bool] = {
@@ -67,6 +68,8 @@ class GammaClient:
             "limit": limit,
             "offset": offset,
         }
+        if query:
+            params["query"] = query
         return await self._get("/markets", params)
 
     async def fetch_all_active_markets(

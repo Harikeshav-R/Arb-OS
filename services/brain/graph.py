@@ -14,16 +14,20 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TypedDict
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import (
+    HumanMessage,
+    SystemMessage,
+)
 from langchain_ibm import ChatWatsonx
 from langgraph.constants import END, START
 from langgraph.graph import StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from loguru import logger
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from config import BrainSettings
+from gamma_client import GammaClient
 from models import Market, Relationship, RelationshipOutput
 from prompts import SYSTEM_PROMPT, format_user_prompt
 
@@ -373,11 +377,97 @@ async def parse_intent(
         }
 
 
+async def _sync_from_gamma(
+        keywords: list[str],
+        session: AsyncSession,
+        settings: BrainSettings
+    ) -> list[Market]:
+    """Fetch markets matching the keywords from Gamma and ingest them."""
+    if not keywords:
+        return []
+
+    query = " ".join(keywords).lower()
+    logger.bind(query=query).info("chat_gamma_sync_triggered")
+
+    gc = GammaClient(settings.brain_gamma_api_base_url)
+    try:
+        raw_markets = await gc.fetch_markets(query=query, limit=20)
+    except Exception:
+        logger.exception("chat_gamma_sync_failed")
+        return []
+    finally:
+        await gc.aclose()
+
+    if not raw_markets:
+        return []
+
+    now = datetime.now()
+    ingested = []
+
+    for raw in raw_markets:
+        condition_id = raw.get("conditionId") or raw.get("condition_id")
+        if not condition_id:
+            continue
+
+        result = await session.execute(
+            select(Market).where(Market.condition_id == condition_id)
+        )
+        existing = result.scalars().first()
+
+        clob_token_ids: list[str] = []
+        tokens = raw.get("tokens") or raw.get("clobTokenIds")
+        if isinstance(tokens, list):
+            for t in tokens:
+                if isinstance(t, dict):
+                    token_id = t.get("token_id") or t.get("tokenId")
+                    if token_id:
+                        clob_token_ids.append(str(token_id))
+                elif isinstance(t, str):
+                    clob_token_ids.append(t)
+
+        def parse_bool(val, default):
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, str):
+                return val.lower() in ("true", "1", "yes")
+            return bool(val) if val is not None else default
+
+        market_data = {
+            "question": raw.get("question", ""),
+            "question_id": raw.get("questionID") or raw.get("question_id"),
+            "description": raw.get("description"),
+            "slug": raw.get("slug"),
+            "neg_risk": parse_bool(raw.get("negRisk"), False),
+            "active": parse_bool(raw.get("active"), True),
+            "closed": parse_bool(raw.get("closed"), False),
+            "volume": float(raw.get("volume", 0) or 0),
+            "end_date": raw.get("endDate") or raw.get("end_date"),
+            "event_id": raw.get("eventId") or raw.get("event_id"),
+            "event_title": raw.get("eventTitle") or raw.get("event_title")
+            or raw.get("groupItemTitle"),
+            "clob_token_ids": clob_token_ids,
+            "updated_at": now,
+        }
+
+        if existing:
+            for key, value in market_data.items():
+                setattr(existing, key, value)
+            ingested.append(existing)
+        else:
+            new_market = Market(condition_id=condition_id, **market_data)
+            session.add(new_market)
+            ingested.append(new_market)
+
+    await session.commit()
+    return ingested
+
+
 async def execute_action(
     state: ChatState,
     *,
     session: AsyncSession,
     graph_manager: object,
+    settings: BrainSettings,
 ) -> dict:
     """Execute the action based on classified intent."""
     intent = state.get("intent", "GENERAL_QUESTION")
@@ -398,8 +488,14 @@ async def execute_action(
         matched = []
         for m in all_markets:
             searchable = f"{m.question} {m.description or ''} {m.event_title or ''}".lower()
-            if not keyword_filter or any(kw.lower() in searchable for kw in keywords):
+            if not keyword_filter or all(kw.lower() in searchable for kw in keywords):
                 matched.append(m)
+
+        logger.bind(keywords=keywords, locals_matched=len(matched)).info("chat_local_market_search")
+
+        if not matched and keywords:
+            # Sync directly from Gamma if local DB misses the keywords
+            matched = await _sync_from_gamma(keywords, session, settings)
 
         if not matched:
             matched = all_markets[:10]  # Fallback to top markets
@@ -531,7 +627,7 @@ def build_chat_graph(
 
     async def _execute_action(state: ChatState) -> dict:
         return await execute_action(
-            state, session=session, graph_manager=graph_manager,
+            state, session=session, graph_manager=graph_manager, settings=settings
         )
 
     async def _generate_response(state: ChatState) -> dict:
