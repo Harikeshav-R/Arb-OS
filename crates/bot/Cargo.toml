@@ -17,6 +17,7 @@ serde_json = { workspace = true }
 rust_decimal = { version = "1.40.0", features = ["macros"] }
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
+tokio-util = { version = "0.7.18", features = ["rt"] }
 
 [dev-dependencies]
 rust_decimal_macros = "1.40.0"

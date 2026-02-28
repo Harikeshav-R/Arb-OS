@@ -71,14 +71,23 @@ async fn handle_ws_connection(mut socket: WebSocket, state: AppState) {
             msg = rx.recv() => {
                 match msg {
                     Ok(json_str) => {
-                        let wrapped = serde_json::json!({
-                            "type": "EXECUTION_REPORT",
-                            "data": serde_json::from_str::<serde_json::Value>(&json_str).unwrap_or_default(),
-                        });
-                        if let Ok(wrapped_str) = serde_json::to_string(&wrapped)
-                            && socket.send(Message::Text(wrapped_str.into())).await.is_err()
-                        {
-                            break; // Client disconnected
+                        match serde_json::from_str::<serde_json::Value>(&json_str) {
+                            Ok(parsed) => {
+                                let wrapped = serde_json::json!({
+                                    "type": "EXECUTION_REPORT",
+                                    "data": parsed,
+                                });
+                                if let Ok(wrapped_str) = serde_json::to_string(&wrapped)
+                                    && socket.send(Message::Text(wrapped_str.into())).await.is_err()
+                                {
+                                    break; // Client disconnected
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to parse broadcast JSON (closing connection): {}", e);
+                                let _ = socket.send(Message::Close(None)).await;
+                                break;
+                            }
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {

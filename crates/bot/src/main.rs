@@ -13,6 +13,7 @@ use ledger::Ledger;
 use server::AppState;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 /// ArbOS Unified Orchestrator
@@ -58,6 +59,8 @@ async fn main() -> anyhow::Result<()> {
     let (report_tx, mut report_rx) =
         mpsc::channel::<ExecutionReport>(arbos_core::constants::REPORT_CHANNEL_BUFFER);
 
+    let cancel_token = CancellationToken::new();
+
     // ── Spawn Axum Server ────────────────────────────────────────────────────
 
     let app_state = AppState {
@@ -77,11 +80,21 @@ async fn main() -> anyhow::Result<()> {
     // ── Spawn Tier 1: Ingestor ───────────────────────────────────────────────
 
     let ingestor_cmd_tx_for_seeds = ingestor_cmd_tx.clone();
+    let ingestor_cancel = cancel_token.clone();
     let ingestor_handle = tokio::spawn(async move {
+        // Here we simulate checking cancellation, ideally IngestorActor also takes the token.
+        // For simplicity, we wrap its execution or let it handle dropped channels.
         let mut ingestor = IngestorActor::new();
-        if let Err(e) = ingestor.run(ingestor_cmd_rx, orderbook_tx).await {
-            error!("IngestorActor critical failure: {:?}", e);
-            return Err(e);
+        tokio::select! {
+            res = ingestor.run(ingestor_cmd_rx, orderbook_tx) => {
+                if let Err(e) = res {
+                    error!("IngestorActor critical failure: {:?}", e);
+                    return Err(e);
+                }
+            }
+            _ = ingestor_cancel.cancelled() => {
+                info!("Ingestor gracefully cancelled via token.");
+            }
         }
         Ok(())
     });
@@ -99,11 +112,19 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Spawn Tier 3: Engine ─────────────────────────────────────────────────
 
+    let engine_cancel = cancel_token.clone();
     let engine_handle = tokio::spawn(async move {
         let mut engine = EngineActor::new();
-        if let Err(e) = engine.run(orderbook_rx, signal_tx, ingestor_cmd_tx).await {
-            error!("EngineActor critical failure: {:?}", e);
-            return Err(e);
+        tokio::select! {
+             res = engine.run(orderbook_rx, signal_tx, ingestor_cmd_tx) => {
+                 if let Err(e) = res {
+                     error!("EngineActor critical failure: {:?}", e);
+                     return Err(e);
+                 }
+             }
+             _ = engine_cancel.cancelled() => {
+                 info!("Engine gracefully cancelled via token.");
+             }
         }
         Ok(())
     });
@@ -114,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
     let executor_broadcast = broadcast_tx.clone();
     let execution_mode = config.execution_mode;
     let dedup_cooldown = config.dedup_cooldown_secs;
+    let executor_cancel = cancel_token.clone();
     let executor_handle = tokio::spawn(async move {
         let mut executor = ExecutorActor::new(
             execution_mode,
@@ -121,9 +143,16 @@ async fn main() -> anyhow::Result<()> {
             executor_ledger,
             executor_broadcast,
         );
-        if let Err(e) = executor.run(signal_rx, report_tx).await {
-            error!("ExecutorActor critical failure: {:?}", e);
-            return Err(e);
+        tokio::select! {
+             res = executor.run(signal_rx, report_tx) => {
+                 if let Err(e) = res {
+                     error!("ExecutorActor critical failure: {:?}", e);
+                     return Err(e);
+                 }
+             }
+             _ = executor_cancel.cancelled() => {
+                 info!("Executor gracefully cancelled via token.");
+             }
         }
         Ok(())
     });
@@ -156,7 +185,10 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Graceful Shutdown ────────────────────────────────────────────────────
 
-    // Dropping channels signals all actors to stop
+    // Trigger the cancellation token for all actors
+    cancel_token.cancel();
+
+    // Dropping channels signals any dangling non-tokio listeners
     drop(ingestor_cmd_tx_for_seeds);
     server_handle.abort(); // Axum server doesn't stop on channel close
 

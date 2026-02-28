@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// The type of arbitrage strategy that generated a signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum StrategyType {
     Implication,
     Partition,

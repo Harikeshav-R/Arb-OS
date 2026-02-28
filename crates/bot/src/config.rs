@@ -40,7 +40,7 @@ impl BotConfig {
             .filter(|s| !s.trim().is_empty())
             .filter_map(|s| {
                 U256::from_str(s.trim())
-                    .inspect_err(|&e| {
+                    .inspect_err(|e| {
                         warn!(asset = s.trim(), error = %e, "Skipping invalid asset ID");
                     })
                     .ok()
@@ -78,6 +78,25 @@ mod tests {
 
     #[test]
     fn test_config_defaults() {
+        // Run test in an isolated env space (or temporarily clear the relevant variables)
+        // to avoid flakiness in CI environments that set some ARBOS_ vars.
+        let vars_to_clear = [
+            "ARBOS_LIVE_MODE",
+            "ARBOS_INITIAL_ASSETS",
+            "ARBOS_WS_PORT",
+            "ARBOS_DEDUP_COOLDOWN",
+            "ARBOS_MAX_HISTORY",
+        ];
+
+        // Save current values
+        let mut saved_vars = Vec::new();
+        for var in &vars_to_clear {
+            saved_vars.push((*var, std::env::var(*var).ok()));
+            unsafe {
+                std::env::remove_var(*var);
+            }
+        }
+
         // With no env vars set, should use safe defaults
         let config = BotConfig::from_env();
         assert_eq!(config.execution_mode, ExecutionMode::Demo);
@@ -85,5 +104,14 @@ mod tests {
         assert_eq!(config.ws_port, 3001);
         assert_eq!(config.dedup_cooldown_secs, 30);
         assert_eq!(config.max_history_entries, 500);
+
+        // Restore prior env values
+        for (var, val_opt) in saved_vars {
+            if let Some(val) = val_opt {
+                unsafe {
+                    std::env::set_var(var, val);
+                }
+            }
+        }
     }
 }
