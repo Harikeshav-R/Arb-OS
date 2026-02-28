@@ -6,8 +6,8 @@ use axum::response::{IntoResponse, Json};
 use axum::routing::get;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
-use tower_http::cors::CorsLayer;
-use tracing::{error, info};
+use tower_http::cors::{Any, CorsLayer};
+use tracing::{error, info, warn};
 
 /// Shared state accessible by all Axum handlers.
 #[derive(Clone)]
@@ -26,13 +26,30 @@ pub async fn start_server(state: AppState, port: u16) -> anyhow::Result<()> {
         .route("/api/status", get(status_handler))
         .layer(
             std::env::var("VITE_ALLOWED_ORIGINS")
+                .ok()
+                .filter(|s| !s.is_empty())
                 .map(|origin| {
-                    CorsLayer::new()
-                        .allow_origin(origin.parse::<axum::http::HeaderValue>().unwrap())
-                        .allow_methods(tower_http::cors::Any)
-                        .allow_headers(tower_http::cors::Any)
+                    match origin.parse::<axum::http::HeaderValue>() {
+                        Ok(header) => CorsLayer::new()
+                            .allow_origin(header)
+                            .allow_methods(Any)
+                            .allow_headers(Any),
+                        Err(e) => {
+                            warn!("Invalid VITE_ALLOWED_ORIGINS value '{}': {}. Falling back to safe localhost default.", origin, e);
+                            CorsLayer::new()
+                                .allow_origin("http://localhost:5173".parse::<axum::http::HeaderValue>().unwrap())
+                                .allow_methods(Any)
+                                .allow_headers(Any)
+                        }
+                    }
                 })
-                .unwrap_or_else(|_| CorsLayer::permissive()), // Use permissive if unspecified, but can be locked down
+                .unwrap_or_else(|| {
+                    // Safe default if no env var is provided: only allow standard local vite dev server
+                    CorsLayer::new()
+                        .allow_origin("http://localhost:5173".parse::<axum::http::HeaderValue>().unwrap())
+                        .allow_methods(Any)
+                        .allow_headers(Any)
+                }),
         )
         .with_state(state);
 
@@ -127,12 +144,25 @@ async fn status_handler(State(state): State<AppState>) -> impl IntoResponse {
 
 /// Build the status JSON payload from shared state.
 async fn build_status_json(state: &AppState) -> anyhow::Result<serde_json::Value> {
-    let ledger = state.ledger.read().await;
+    // Minimize lock contention by cloning the needed data quickly and dropping the lock
     let uptime = state.start_time.elapsed().as_secs();
+    let (positions_snap, history_snap, cumulative_pnl, total_signals) = {
+        let ledger = state.ledger.read().await;
+        (
+            ledger.get_positions(),
+            // Map the history explicitly so we own the data before dropping the lock
+            ledger
+                .get_recent_history(50)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            ledger.cumulative_pnl(),
+            ledger.total_signals(),
+        )
+    };
 
-    let positions: Vec<serde_json::Value> = ledger
-        .get_positions()
-        .iter()
+    let positions: Vec<serde_json::Value> = positions_snap
+        .into_iter()
         .map(|p| {
             serde_json::json!({
                 "asset_id": p.asset_id.to_string(),
@@ -144,9 +174,8 @@ async fn build_status_json(state: &AppState) -> anyhow::Result<serde_json::Value
         })
         .collect();
 
-    let recent_trades: Vec<serde_json::Value> = ledger
-        .get_recent_history(50)
-        .iter()
+    let recent_trades: Vec<serde_json::Value> = history_snap
+        .into_iter()
         .map(|r| {
             serde_json::json!({
                 "strategy": r.signal.strategy.to_string(),
@@ -168,11 +197,89 @@ async fn build_status_json(state: &AppState) -> anyhow::Result<serde_json::Value
         .collect();
 
     Ok(serde_json::json!({
-        "mode": format!("{:?}", state.mode),
-        "cumulative_pnl": ledger.cumulative_pnl().to_string(),
-        "signals_executed": ledger.total_signals(),
+        // Stable serialization instead of Debug representation
+        "mode": match state.mode {
+            arbos_core::domain::ExecutionMode::Live => "LIVE",
+            arbos_core::domain::ExecutionMode::Demo => "DEMO",
+        },
+        "cumulative_pnl": cumulative_pnl.to_string(),
+        "signals_executed": total_signals,
         "uptime_secs": uptime,
         "positions": positions,
         "recent_trades": recent_trades,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn build_test_router() -> Router {
+        let state = AppState {
+            ledger: Arc::new(RwLock::new(Ledger::new(50))),
+            broadcast_tx: broadcast::channel(10).0,
+            start_time: std::time::Instant::now(),
+            mode: arbos_core::domain::ExecutionMode::Demo,
+        };
+
+        Router::new()
+            .route("/api/health", get(health_handler))
+            .route("/api/status", get(status_handler))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn test_health_endpoint() {
+        let app = build_test_router();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"OK");
+    }
+
+    #[tokio::test]
+    async fn test_status_endpoint() {
+        let app = build_test_router();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("Invalid JSON returned by /api/status");
+
+        assert_eq!(payload["mode"], "DEMO");
+        assert!(payload["uptime_secs"].is_u64());
+        assert_eq!(payload["cumulative_pnl"], "0"); // Starts at zero
+        assert_eq!(payload["signals_executed"], 0);
+        assert!(payload["positions"].is_array());
+        assert!(payload["recent_trades"].is_array());
+    }
 }

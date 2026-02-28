@@ -49,6 +49,10 @@ impl Ledger {
             }
         }
 
+        if self.max_history == 0 {
+            return;
+        }
+
         if self.history.len() >= self.max_history {
             self.history.pop_back();
         }
