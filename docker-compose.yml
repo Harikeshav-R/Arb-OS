@@ -64,6 +64,8 @@ services:
     env_file: .env
     environment:
       BRAIN_API_URL: http://brain:8000
+      RUST_LOG: info
+      ARBOS_WS_PORT: 8001
     depends_on:
       brain:
         condition: service_healthy

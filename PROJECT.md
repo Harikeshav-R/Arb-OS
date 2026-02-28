@@ -300,4 +300,5 @@ Every tier in ArbOS must implement structured, machine-readable logging. Standar
 2.  [ ] **Approve**: Call `setApprovalForAll` on the CTF Exchange Contract for your USDC.
 3.  [ ] **Env**: Fill `.env` with `POLYMARKET_API_KEY`, `PASSPHRASE`, `SECRET`.
 4.  [ ] **Test**: Run `cargo test` to verify EIP-712 signing matches Etherscan's signature tool.
-5.  [ ] **Live**: Start `docker-compose up`. Watch the logs.
+5.  [ ] **Live**: Start the entire ecosystem (Postgres, Python Brain, Rust Bot, React Frontend) by running `make up`. Watch the logs via `make logs`.
+6.  [ ] **Analyze**: Visit the frontend UI at `http://localhost:5173`.
