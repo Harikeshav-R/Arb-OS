@@ -1,10 +1,17 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import Navbar from '../components/Navbar';
-import ForceGraph, { DEFAULT_NODES, DEFAULT_EDGES } from '../components/ForceGraph';
+import ForceGraph from '../components/ForceGraph';
 import { useQuery } from '@tanstack/react-query';
+import {
+  fetchGraphVis,
+  fetchBrainHealth,
+  fetchBotHealth,
+  fetchGraphStats,
+  BOT_WS_URL,
+} from '../lib/api';
 
 interface TradeRow {
   time: string;
@@ -49,36 +56,59 @@ interface WsFillDetail {
   filled: boolean;
 }
 
-function getTimeStr(): string {
-  const now = new Date();
-  return now.toTimeString().slice(0, 8);
-}
-
 export default function Dashboard() {
   const navigate = useNavigate();
   const { data: graphData } = useQuery({
     queryKey: ['graph-vis'],
-    queryFn: async () => {
-      const res = await fetch('http://localhost:8000/graph/vis');
-      if (!res.ok) throw new Error('Failed to fetch graph');
-      return res.json();
-    },
+    queryFn: fetchGraphVis,
     refetchInterval: 5000,
   });
+
+  const { data: graphStats } = useQuery({
+    queryKey: ['graph-stats'],
+    queryFn: fetchGraphStats,
+    refetchInterval: 10000,
+  });
+
   const [pnl, setPnl] = useState(0);
   const [trades, setTrades] = useState<TradeRow[]>([]);
-  const [latency, setLatency] = useState(14);
   const [wsStatus, setWsStatus] = useState<'Connecting' | 'Live' | 'Disconnected'>('Connecting');
-  const [fedJunePrice, setFedJunePrice] = useState(0.58);
-  const [fedPrice, setFedPrice] = useState(0.56);
   const [paused, setPaused] = useState(false);
+  const [botMode, setBotMode] = useState('—');
+  const [uptimeSecs, setUptimeSecs] = useState(0);
+  const [signalsExecuted, setSignalsExecuted] = useState(0);
+  const [positions, setPositions] = useState<WsPosition[]>([]);
+
+  // Live health checks
+  const [brainHealthy, setBrainHealthy] = useState<boolean | null>(null);
+  const [botHealthy, setBotHealthy] = useState<boolean | null>(null);
+  const [brainDbOk, setBrainDbOk] = useState(false);
+  const [brainLlmOk, setBrainLlmOk] = useState(false);
+
+  // Poll health checks
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const h = await fetchBrainHealth();
+        setBrainHealthy(h.status === 'ok' || h.status === 'degraded');
+        setBrainDbOk(h.db_connected);
+        setBrainLlmOk(h.llm_configured);
+      } catch {
+        setBrainHealthy(false);
+      }
+      setBotHealthy(await fetchBotHealth());
+    };
+    check();
+    const interval = setInterval(check, 15000);
+    return () => clearInterval(interval);
+  }, []);
 
   // WebSocket Integration
   useEffect(() => {
     if (paused) return;
 
     setWsStatus('Connecting');
-    const ws = new WebSocket('ws://localhost:8001/ws');
+    const ws = new WebSocket(`${BOT_WS_URL}/ws`);
 
     ws.onopen = () => {
       setWsStatus('Live');
@@ -91,10 +121,13 @@ export default function Dashboard() {
         if (payload.type === 'SNAPSHOT') {
           const data = payload.data as WsSnapshot;
           setPnl(parseFloat(data.cumulative_pnl));
+          setBotMode(data.mode);
+          setUptimeSecs(data.uptime_secs);
+          setSignalsExecuted(data.signals_executed);
+          setPositions(data.positions);
 
-          // Map initial trades
           const initialTrades = data.recent_trades.map((t: WsExecutionReport) => {
-            const timeStr = new Date(t.executed_at).toTimeString().slice(0, 8);
+            const timeStr = new Date(Number(t.executed_at) * 1000).toTimeString().slice(0, 8);
             return {
               time: timeStr,
               type: t.strategy,
@@ -107,7 +140,7 @@ export default function Dashboard() {
           setTrades(initialTrades);
         } else if (payload.type === 'EXECUTION_REPORT') {
           const t = payload.data as WsExecutionReport;
-          const timeStr = new Date(t.executed_at).toTimeString().slice(0, 8);
+          const timeStr = new Date(Number(t.executed_at) * 1000).toTimeString().slice(0, 8);
 
           const newTrade: TradeRow = {
             time: timeStr,
@@ -142,29 +175,34 @@ export default function Dashboard() {
     toast.info(`${label} — Coming soon`, { duration: 4000 });
   }, []);
 
-  // P&L chart data (simple)
+  // P&L chart data
   const [chartPoints, setChartPoints] = useState<number[]>(() => {
     const pts: number[] = [];
-    let v = 30;
+    let v = 0;
     for (let i = 0; i < 24; i++) {
-      v += Math.random() * 2 - 0.3;
+      v += Math.random() * 0.5 - 0.1;
       pts.push(v);
     }
     return pts;
   });
 
+  // Update chart with real P&L when it changes
   useEffect(() => {
-    const interval = setInterval(() => {
-      setChartPoints(prev => {
-        const next = [...prev.slice(1), prev[prev.length - 1] + Math.random() * 1.5 - 0.2];
-        return next;
-      });
-    }, 4000);
-    return () => clearInterval(interval);
-  }, []);
+    setChartPoints(prev => {
+      const next = [...prev.slice(1), pnl];
+      return next;
+    });
+  }, [pnl]);
 
-  const chartMax = Math.max(...chartPoints);
-  const chartMin = Math.min(...chartPoints);
+  const formatUptime = (secs: number) => {
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    return `${h}h ${m}m ${s}s`;
+  };
+
+  const chartMax = Math.max(...chartPoints, 0.01);
+  const chartMin = Math.min(...chartPoints, 0);
   const chartH = 120;
   const chartW = 400;
   const pathD = chartPoints.map((p, i) => {
@@ -182,9 +220,10 @@ export default function Dashboard() {
           <span className="font-mono font-bold text-lg text-primary">ArbOS</span>
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-primary animate-pulse-dot" />
-              <span className="font-mono text-xs text-primary">LIVE</span>
+              <span className={`w-2 h-2 rounded-full ${wsStatus === 'Live' ? 'bg-primary animate-pulse-dot' : 'bg-destructive'}`} />
+              <span className="font-mono text-xs text-primary">{wsStatus === 'Live' ? 'LIVE' : wsStatus.toUpperCase()}</span>
             </div>
+            <span className="font-mono text-xs text-muted-foreground">{botMode}</span>
             <span className="font-mono text-sm text-primary">P&L: +${pnl.toFixed(2)}</span>
           </div>
           <div className="flex gap-2">
@@ -218,13 +257,13 @@ export default function Dashboard() {
               <h3 className="text-sm font-semibold text-foreground mb-3">Portfolio Summary</h3>
               <div className="space-y-1.5 font-mono text-xs">
                 {[
-                  ['Allocated', '$500.00'],
-                  ['In Positions', '$312.40'],
-                  ['Available', '$187.60'],
+                  ['Mode', botMode],
+                  ['Uptime', formatUptime(uptimeSecs)],
+                  ['Open Positions', `${positions.length}`],
                   ['Total P&L', `+$${pnl.toFixed(2)}`, true],
-                  ['ROI', `+${((pnl / 500) * 100).toFixed(2)}%`, true],
-                  ['Trades Today', '7'],
-                  ['Win Rate', '100%'],
+                  ['Signals Executed', `${signalsExecuted}`],
+                  ['Markets Tracked', `${graphStats?.total_markets ?? '—'}`],
+                  ['Relationships', `${graphStats?.total_relationships ?? '—'}`],
                 ].map(([label, value, isTeal]) => (
                   <div key={label as string} className="flex justify-between">
                     <span className="text-muted-foreground">{label}</span>
@@ -249,7 +288,7 @@ export default function Dashboard() {
 
             {/* Live Graph */}
             <div className="rounded-lg border border-border bg-card card-shadow overflow-hidden flex flex-col items-center justify-center relative" style={{ minHeight: 400 }}>
-              {graphData ? (
+              {graphData && graphData.nodes.length > 0 ? (
                 <ForceGraph
                   nodes={graphData.nodes}
                   edges={graphData.edges}
@@ -258,15 +297,13 @@ export default function Dashboard() {
                   animated
                 />
               ) : (
-                <ForceGraph
-                  nodes={DEFAULT_NODES}
-                  edges={DEFAULT_EDGES}
-                  width={700}
-                  height={450}
-                  animated
-                />
+                <div className="flex flex-col items-center gap-3 text-center p-8">
+                  <span className="text-4xl">📊</span>
+                  <p className="text-sm text-muted-foreground font-mono">Waiting for graph data...</p>
+                  <p className="text-xs text-muted-foreground">Markets will appear here once the Brain discovers relationships</p>
+                </div>
               )}
-              {graphData && (
+              {graphData && graphData.nodes.length > 0 && (
                 <div className="absolute top-2 right-2 flex gap-2">
                   <div className="px-2 py-0.5 rounded text-[10px] font-mono bg-primary/10 text-primary border border-primary/20">
                     Live Nodes: {graphData.nodes.length}
@@ -295,25 +332,33 @@ export default function Dashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {trades.map((t, i) => (
-                    <tr
-                      key={`${t.time}-${i}`}
-                      className={`border-b border-border/50 animate-slide-down ${t.status === 'FILLED' ? 'text-foreground' :
-                        t.status === 'SKIPPED' ? 'text-warning' : 'text-muted-foreground'
-                        }`}
-                    >
-                      <td className="py-2 pr-3">{t.time}</td>
-                      <td className="py-2 pr-3">{t.type}</td>
-                      <td className="py-2 pr-3 max-w-[200px] truncate">{t.marketA}</td>
-                      <td className="py-2 pr-3">{t.marketB}</td>
-                      <td className={`py-2 pr-3 ${t.status === 'FILLED' ? 'text-primary' : ''}`}>{t.profit}</td>
-                      <td className="py-2">
-                        {t.status === 'FILLED' && <span className="text-primary">✓ FILLED</span>}
-                        {t.status === 'SKIPPED' && <span className="text-warning">⏭ SKIPPED</span>}
-                        {t.status === 'INFO' && <span className="text-muted-foreground">ℹ INFO</span>}
+                  {trades.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="py-8 text-center text-muted-foreground">
+                        No trades yet — waiting for arbitrage signals...
                       </td>
                     </tr>
-                  ))}
+                  ) : (
+                    trades.map((t, i) => (
+                      <tr
+                        key={`${t.time}-${i}`}
+                        className={`border-b border-border/50 animate-slide-down ${t.status === 'FILLED' ? 'text-foreground' :
+                          t.status === 'SKIPPED' ? 'text-warning' : 'text-muted-foreground'
+                          }`}
+                      >
+                        <td className="py-2 pr-3">{t.time}</td>
+                        <td className="py-2 pr-3">{t.type}</td>
+                        <td className="py-2 pr-3 max-w-[200px] truncate">{t.marketA}</td>
+                        <td className="py-2 pr-3">{t.marketB}</td>
+                        <td className={`py-2 pr-3 ${t.status === 'FILLED' ? 'text-primary' : ''}`}>{t.profit}</td>
+                        <td className="py-2">
+                          {t.status === 'FILLED' && <span className="text-primary">✓ FILLED</span>}
+                          {t.status === 'SKIPPED' && <span className="text-warning">⏭ SKIPPED</span>}
+                          {t.status === 'INFO' && <span className="text-muted-foreground">ℹ INFO</span>}
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
@@ -325,27 +370,23 @@ export default function Dashboard() {
             <div className="rounded-lg border border-border bg-card card-shadow p-5">
               <h3 className="text-sm font-semibold text-foreground mb-3">Open Positions</h3>
               <div className="space-y-4">
-                {[
-                  { name: 'Fed Cut June YES (SHORT)', shares: 50, entry: 0.60, current: fedJunePrice, pair: 'Fed Cut 2026', pnl: '+$2.47' },
-                  { name: 'Fed Cut 2026 YES (LONG)', shares: 50, entry: 0.55, current: fedPrice, pair: 'Fed Cut June', pnl: '+$1.83' },
-                ].map(pos => (
-                  <div key={pos.name} className="border border-border rounded-md p-3">
-                    <p className="text-xs font-semibold text-foreground">{pos.name}</p>
-                    <p className="font-mono text-[10px] text-muted-foreground mt-1">
-                      {pos.shares} shares @ {pos.entry.toFixed(2)}¢
-                    </p>
-                    <div className="flex justify-between mt-1.5 font-mono text-[10px]">
-                      <span className="text-muted-foreground">Current: <span className="text-foreground tabular-nums">{pos.current.toFixed(2)}¢</span></span>
-                      <span className="text-muted-foreground">Paired: {pos.pair}</span>
+                {positions.length === 0 ? (
+                  <p className="font-mono text-xs text-muted-foreground py-4 text-center">
+                    No open positions
+                  </p>
+                ) : (
+                  positions.map((pos, i) => (
+                    <div key={`${pos.asset_id}-${i}`} className="border border-border rounded-md p-3">
+                      <p className="text-xs font-semibold text-foreground">{pos.side} — {pos.asset_id.slice(0, 16)}…</p>
+                      <p className="font-mono text-[10px] text-muted-foreground mt-1">
+                        {pos.size} shares @ {parseFloat(pos.entry_price).toFixed(4)}
+                      </p>
+                      <div className="flex justify-between mt-1.5 font-mono text-[10px]">
+                        <span className="text-muted-foreground">Opened: {new Date(parseInt(pos.opened_at) * 1000).toLocaleString()}</span>
+                      </div>
                     </div>
-                    <div className="flex justify-between items-center mt-2">
-                      <span className="font-mono text-xs text-primary">Guaranteed P&L: {pos.pnl}</span>
-                      <button className="font-mono text-[10px] px-2 py-1 rounded border border-border text-muted-foreground hover:text-foreground transition-colors">
-                        Close Position
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  ))
+                )}
               </div>
             </div>
 
@@ -354,15 +395,14 @@ export default function Dashboard() {
               <h3 className="text-sm font-semibold text-foreground mb-3">System Health</h3>
               <div className="space-y-2 font-mono text-xs">
                 {[
-                  ['Engine Latency', `${latency}ms`, '⚡'],
-                  ['WebSocket', wsStatus, wsStatus === 'Live' ? '🟢' : '🔴'],
-                  ['Gamma API', 'OK', '🟢'],
-                  ['Brain (WatsonX)', 'OK', '🟢'],
-                  ['Polygon Gas', '$0.003', ''],
-                  ['MATIC Balance', '8.4', ''],
-                  ['Redis', 'OK', '🟢'],
-                  ['PostgreSQL', 'OK', '🟢'],
-                  ['Last AI Refresh', '4 minutes ago', ''],
+                  ['Bot WebSocket', wsStatus, wsStatus === 'Live' ? '🟢' : '🔴'],
+                  ['Bot Orchestrator', botHealthy === null ? 'Checking...' : botHealthy ? 'Online' : 'Offline', botHealthy ? '🟢' : '🔴'],
+                  ['Brain API', brainHealthy === null ? 'Checking...' : brainHealthy ? 'Online' : 'Offline', brainHealthy ? '🟢' : '🔴'],
+                  ['PostgreSQL', brainDbOk ? 'Connected' : 'Disconnected', brainDbOk ? '🟢' : '🔴'],
+                  ['LLM (WatsonX)', brainLlmOk ? 'Configured' : 'Not Configured', brainLlmOk ? '🟢' : '⚠️'],
+                  ['Markets Tracked', `${graphStats?.total_markets ?? '—'}`, ''],
+                  ['Relationships', `${graphStats?.total_relationships ?? '—'}`, ''],
+                  ['Uptime', formatUptime(uptimeSecs), ''],
                 ].map(([label, value, icon]) => (
                   <div key={label} className="flex justify-between items-center">
                     <span className="text-muted-foreground">{label}</span>

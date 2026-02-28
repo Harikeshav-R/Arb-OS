@@ -1,6 +1,8 @@
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import WebGLCanvas from '../components/WebGLCanvas';
+import { useQuery } from '@tanstack/react-query';
+import { fetchGraphStats, fetchBotStatus } from '../lib/api';
 
 const stagger = {
   hidden: { opacity: 0, y: 20 },
@@ -11,13 +13,25 @@ const stagger = {
   }),
 };
 
-const stats = [
-  { label: '$12,847 captured today' },
-  { label: '347 relationships mapped' },
-  { label: '14ms detection' },
-];
-
 export default function Landing() {
+  const { data: graphStats } = useQuery({
+    queryKey: ['graph-stats'],
+    queryFn: fetchGraphStats,
+    retry: 1,
+    staleTime: 30000,
+  });
+
+  const { data: botStatus } = useQuery({
+    queryKey: ['bot-status'],
+    queryFn: fetchBotStatus,
+    retry: 1,
+    staleTime: 30000,
+  });
+
+  const pnl = botStatus ? `$${parseFloat(botStatus.cumulative_pnl).toFixed(2)} P&L` : 'Arbitrage Engine';
+  const relationships = graphStats ? `${graphStats.total_relationships} relationships mapped` : 'AI-powered analysis';
+  const signals = botStatus ? `${botStatus.signals_executed} signals executed` : 'Real-time detection';
+
   return (
     <div className="relative min-h-screen overflow-hidden bg-background">
       <WebGLCanvas />
@@ -82,12 +96,12 @@ export default function Landing() {
             variants={stagger}
             className="flex flex-col sm:flex-row gap-3 mt-10"
           >
-            {stats.map((s) => (
+            {[pnl, relationships, signals].map((label) => (
               <div
-                key={s.label}
+                key={label}
                 className="flex items-center gap-2 px-4 py-2.5 rounded-md bg-card border-l-2 border-l-primary font-mono text-xs text-foreground card-shadow"
               >
-                {s.label}
+                {label}
               </div>
             ))}
           </motion.div>

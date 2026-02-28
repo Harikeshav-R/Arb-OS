@@ -3,9 +3,10 @@ import { motion } from 'framer-motion';
 import Navbar from '../components/Navbar';
 import ProgressBar from '../components/ProgressBar';
 import StepNav from '../components/StepNav';
-import ForceGraph, { DEFAULT_NODES, DEFAULT_EDGES } from '../components/ForceGraph';
+import ForceGraph from '../components/ForceGraph';
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '../components/ui/resizable';
 import { useQuery } from '@tanstack/react-query';
+import { fetchGraphVis, fetchGraphStats, sendChatMessage, syncAssets, type ChatMessage as ApiChatMessage } from '../lib/api';
 
 interface ChatMessage {
   role: 'ai' | 'user';
@@ -17,24 +18,16 @@ const INITIAL_MSG: ChatMessage = {
   text: "Welcome to ArbOS. Tell me what events or topics you're interested in monitoring. For example: 'Track everything related to 2026 Federal Reserve rate decisions' or 'Show me all US election markets'. I'll map the logical relationships and find arbitrage opportunities automatically.",
 };
 
-const AI_RESPONSE = `Great choice — Fed rate decisions are one of the most actively traded categories on Polymarket. I found 14 active markets related to Federal Reserve rate decisions in 2026. Mapping logical relationships now...
-
-✓ Graph generated: 14 nodes, 23 edges. Detected 3 active arbitrage opportunities:
-
-1. IMPLICATION: "June cut" (60¢) → "2026 cut" (55¢) ⚠️ VIOLATION — +5¢ spread
-2. PARTITION: Monthly cut probabilities sum to 112% ⚠️ VIOLATION
-3. IMPLICATION: "CPI > 3%" → "No rate cut 2026" (confidence: 0.7)
-
-Would you like to add more markets or refine the graph?`;
-
 export default function Graph() {
   const { data: graphData } = useQuery({
     queryKey: ['graph-vis'],
-    queryFn: async () => {
-      const res = await fetch('http://localhost:8000/graph/vis');
-      if (!res.ok) throw new Error('Failed to fetch graph');
-      return res.json();
-    },
+    queryFn: fetchGraphVis,
+    refetchInterval: 5000,
+  });
+
+  const { data: statsData } = useQuery({
+    queryKey: ['graph-stats'],
+    queryFn: fetchGraphStats,
     refetchInterval: 5000,
   });
 
@@ -46,20 +39,16 @@ export default function Graph() {
     if (!graphData?.nodes) return;
 
     const newAssets = graphData.nodes
-      .map((n: { id: string }) => n.id)
-      .filter((id: string) => !syncedAssets.current.has(id));
+      .map((n) => n.id)
+      .filter((id) => !syncedAssets.current.has(id));
 
     if (newAssets.length > 0) {
-      newAssets.forEach((id: string) => syncedAssets.current.add(id));
+      newAssets.forEach((id) => syncedAssets.current.add(id));
 
-      fetch('http://localhost:8001/api/assets/add', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ asset_ids: newAssets })
-      }).catch(err => {
+      syncAssets(newAssets).catch(err => {
         console.error('Failed to sync new assets to orchestrator', err);
         // Remove from set so we try again later
-        newAssets.forEach((id: string) => syncedAssets.current.delete(id));
+        newAssets.forEach((id) => syncedAssets.current.delete(id));
       });
     }
   }, [graphData]);
@@ -75,19 +64,38 @@ export default function Graph() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, typing]);
 
-  const handleSend = () => {
+  const handleSend = async () => {
     if (!input.trim() || typing) return;
     const userMsg: ChatMessage = { role: 'user', text: input };
-    setMessages(prev => [...prev, userMsg]);
+    const updatedMessages = [...messages, userMsg];
+    setMessages(updatedMessages);
     setInput('');
     setTyping(true);
 
-    setTimeout(() => {
-      setTyping(false);
-      setMessages(prev => [...prev, { role: 'ai', text: AI_RESPONSE }]);
+    try {
+      // Build history for the API (exclude the initial system message)
+      const history: ApiChatMessage[] = updatedMessages
+        .slice(1) // Skip the initial welcome message
+        .map(m => ({ role: m.role, text: m.text }));
+
+      const response = await sendChatMessage(input, history);
+
+      setMessages(prev => [...prev, { role: 'ai', text: response.response }]);
       setGraphKey(k => k + 1);
-    }, 1500);
+    } catch (err) {
+      console.error('Chat API error:', err);
+      setMessages(prev => [...prev, {
+        role: 'ai',
+        text: 'Failed to reach ArbOS Brain. Please check that the backend is running on port 8000.',
+      }]);
+    } finally {
+      setTyping(false);
+    }
   };
+
+  const nodeCount = graphData ? graphData.nodes.length : (statsData?.total_markets ?? 0);
+  const edgeCount = graphData ? graphData.edges.length : (statsData?.total_relationships ?? 0);
+  const arbCount = statsData?.total_implies ?? 0;
 
   return (
     <div className="h-screen bg-background flex flex-col overflow-hidden">
@@ -143,9 +151,9 @@ export default function Graph() {
             {/* Stats */}
             <div className="shrink-0 px-4 py-2 border-t border-border">
               <div className="font-mono text-[10px] text-muted-foreground flex gap-4">
-                <span>Nodes: <span className="text-primary">{graphData ? graphData.nodes.length : 14}</span></span>
-                <span>Edges: <span className="text-primary">{graphData ? graphData.edges.length : 23}</span></span>
-                <span>Active Arbs: <span className="text-primary">3</span></span>
+                <span>Nodes: <span className="text-primary">{nodeCount}</span></span>
+                <span>Edges: <span className="text-primary">{edgeCount}</span></span>
+                <span>Implications: <span className="text-primary">{arbCount}</span></span>
               </div>
             </div>
 
@@ -168,7 +176,7 @@ export default function Graph() {
                 </button>
               </div>
               <p className="text-[10px] text-muted-foreground mt-1.5 font-mono">
-                Try: /add crypto · /remove · /scan · /suggest
+                Try: "Track Federal Reserve markets" · "Show graph stats" · "Find crypto markets"
               </p>
             </div>
           </ResizablePanel>
@@ -180,7 +188,7 @@ export default function Graph() {
             <div className="w-full h-full bg-background relative flex items-center justify-center" style={{ minHeight: '400px' }}>
               {hasUserSentMessage ? (
                 <>
-                  {graphData ? (
+                  {graphData && graphData.nodes.length > 0 ? (
                     <ForceGraph
                       key={graphKey}
                       nodes={graphData.nodes}
@@ -190,14 +198,11 @@ export default function Graph() {
                       animated
                     />
                   ) : (
-                    <ForceGraph
-                      key={graphKey}
-                      nodes={DEFAULT_NODES}
-                      edges={DEFAULT_EDGES}
-                      width={700}
-                      height={500}
-                      animated
-                    />
+                    <div className="flex flex-col items-center gap-3 text-center p-8">
+                      <span className="text-4xl">🧠</span>
+                      <p className="text-sm text-muted-foreground font-mono">No graph data yet</p>
+                      <p className="text-xs text-muted-foreground">Ask ArbOS to track markets to build this graph</p>
+                    </div>
                   )}
                   {/* Legend */}
                   <div className="absolute bottom-4 left-4 bg-card/80 backdrop-blur border border-border rounded-md px-3 py-2 text-[10px] font-mono text-muted-foreground space-y-1">
@@ -227,7 +232,7 @@ export default function Graph() {
           nextLabel="Finalize Graph →"
           centerContent={
             <span className="font-mono text-xs text-muted-foreground">
-              Nodes: {graphData ? graphData.nodes.length : 14} · Edges: {graphData ? graphData.edges.length : 23} · Arbs: 3
+              Nodes: {nodeCount} · Edges: {edgeCount} · Implications: {arbCount}
             </span>
           }
         />

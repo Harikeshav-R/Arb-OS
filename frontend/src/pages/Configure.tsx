@@ -4,6 +4,8 @@ import { useNavigate } from 'react-router-dom';
 import Navbar from '../components/Navbar';
 import ProgressBar from '../components/ProgressBar';
 import StepNav from '../components/StepNav';
+import { useQuery } from '@tanstack/react-query';
+import { fetchGraphStats, fetchBotStatus } from '../lib/api';
 
 export default function Configure() {
   const navigate = useNavigate();
@@ -14,6 +16,22 @@ export default function Configure() {
   const [maxDuration, setMaxDuration] = useState('30');
   const [autoMode, setAutoMode] = useState(true);
   const [showModal, setShowModal] = useState(false);
+
+  const { data: graphStats } = useQuery({
+    queryKey: ['graph-stats'],
+    queryFn: fetchGraphStats,
+    refetchInterval: 10000,
+  });
+
+  const { data: botStatus } = useQuery({
+    queryKey: ['bot-status'],
+    queryFn: fetchBotStatus,
+    retry: 1,
+  });
+
+  const marketsTracked = graphStats?.total_markets ?? 0;
+  const relationships = graphStats?.total_relationships ?? 0;
+  const implications = graphStats?.total_implies ?? 0;
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -30,7 +48,7 @@ export default function Configure() {
       >
         <h1 className="text-2xl font-bold text-foreground mb-1">Configure Your Arbitrage Agent</h1>
         <p className="text-sm text-muted-foreground mb-8">
-          Your graph: 14 markets, 23 relationships · 3 active opportunities
+          Your graph: {marketsTracked} markets, {relationships} relationships · {implications} implication edges
         </p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -38,12 +56,12 @@ export default function Configure() {
           <div className="rounded-lg border border-border bg-card card-shadow p-5">
             <h3 className="text-sm font-semibold text-foreground mb-4">Capital Allocation</h3>
             <p className="font-mono text-xs text-muted-foreground mb-3">
-              Available USDC Balance: <span className="text-foreground">$1,247.50</span>
+              Set the USDC amount to allocate for arbitrage
             </p>
             <input
               type="range"
               min={10}
-              max={1247}
+              max={2000}
               value={capital}
               onChange={e => setCapital(Number(e.target.value))}
               className="w-full h-1.5 bg-accent rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-primary [&::-webkit-slider-thumb]:shadow-[0_0_10px_rgba(0,212,170,0.4)]"
@@ -79,15 +97,17 @@ export default function Configure() {
             </div>
           </div>
 
-          {/* Projected Performance */}
+          {/* Graph Summary */}
           <div className="rounded-lg border border-border bg-card card-shadow p-5">
-            <h3 className="text-sm font-semibold text-foreground mb-4">Projected Performance</h3>
+            <h3 className="text-sm font-semibold text-foreground mb-4">Graph Summary</h3>
             <div className="space-y-2 font-mono text-xs">
               {[
-                ['Active Opportunities', '3'],
-                ['Avg Spread (after fees)', '3.2¢/share'],
-                ['Est. Daily Opportunity', '$4.80 – $12.50'],
-                ['Est. Monthly Return', '2.1% – 5.4%'],
+                ['Markets Tracked', `${marketsTracked}`],
+                ['Total Relationships', `${relationships}`],
+                ['Implication Edges', `${implications}`],
+                ['Mutual Exclusions', `${graphStats?.total_mutually_exclusive ?? 0}`],
+                ['Connected Components', `${graphStats?.connected_components ?? 0}`],
+                ['Bot Mode', botStatus?.mode ?? '—'],
               ].map(([label, value]) => (
                 <div key={label} className="flex justify-between">
                   <span className="text-muted-foreground">{label}</span>
@@ -95,7 +115,7 @@ export default function Configure() {
                 </div>
               ))}
             </div>
-            <p className="text-[10px] text-warning mt-3">⚠ Estimates based on current conditions.</p>
+            <p className="text-[10px] text-warning mt-3">⚠ Performance depends on market conditions.</p>
           </div>
 
           {/* Execution Mode */}
@@ -161,9 +181,10 @@ export default function Configure() {
               <div className="space-y-2 font-mono text-xs mb-6">
                 {[
                   ['Capital allocated', `$${capital.toFixed(2)} USDC`],
-                  ['Markets monitored', '14'],
+                  ['Markets monitored', `${marketsTracked}`],
                   ['Min profit threshold', `${minProfit}%`],
                   ['Execution mode', autoMode ? 'Automatic' : 'Manual Confirm'],
+                  ['Bot mode', botStatus?.mode ?? '—'],
                 ].map(([label, value]) => (
                   <div key={label} className="flex justify-between">
                     <span className="text-muted-foreground">{label}</span>

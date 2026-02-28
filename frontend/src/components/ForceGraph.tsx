@@ -30,30 +30,7 @@ interface ForceGraphProps {
   animated?: boolean;
 }
 
-export const DEFAULT_NODES: GraphNode[] = [
-  { id: '1', label: 'Fed Cut June 2026', price: 0.60, status: 'arb', volume: 450000 },
-  { id: '2', label: 'Fed Cut 2026', price: 0.55, status: 'arb', volume: 500000 },
-  { id: '3', label: 'Fed Cut Q1', price: 0.22, status: 'normal', volume: 120000 },
-  { id: '4', label: 'Fed Cut Q2', price: 0.31, status: 'normal', volume: 180000 },
-  { id: '5', label: 'Fed Cut Q3', price: 0.28, status: 'normal', volume: 150000 },
-  { id: '6', label: 'No Rate Cut 2026', price: 0.38, status: 'normal', volume: 200000 },
-  { id: '7', label: 'Rate Hike 2026', price: 0.12, status: 'illiquid', volume: 50000 },
-  { id: '8', label: 'Inflation > 3%', price: 0.45, status: 'normal', volume: 280000 },
-  { id: '9', label: 'BTC > $100K', price: 0.41, status: 'normal', volume: 350000 },
-  { id: '10', label: 'BTC ETF Approval', price: 0.67, status: 'normal', volume: 400000 },
-  { id: '11', label: 'Trump Wins Iowa', price: 0.72, status: 'normal', volume: 320000 },
-  { id: '12', label: 'Trump Wins Nom.', price: 0.81, status: 'normal', volume: 380000 },
-];
 
-export const DEFAULT_EDGES: GraphEdge[] = [
-  { source: '1', target: '2', type: 'IMPLIES', label: '+5.0¢', confidence: 0.98, isArb: true },
-  { source: '3', target: '6', type: 'PARTITION', confidence: 0.95 },
-  { source: '4', target: '6', type: 'PARTITION', confidence: 0.95 },
-  { source: '5', target: '6', type: 'PARTITION', confidence: 0.95 },
-  { source: '8', target: '6', type: 'IMPLIES', label: '0.7', confidence: 0.7 },
-  { source: '11', target: '12', type: 'IMPLIES', confidence: 0.85 },
-  { source: '10', target: '9', type: 'IMPLIES', confidence: 0.6 },
-];
 
 export default function ForceGraph({ nodes, edges, width = 700, height = 500, animated = false }: ForceGraphProps) {
   const svgRef = useRef<SVGSVGElement>(null);
