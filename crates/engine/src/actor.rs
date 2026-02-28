@@ -1,4 +1,6 @@
-use arbos_core::domain::{ArbSignal, IngestorCommand, NormalizedOrderbook, TradeAction};
+use arbos_core::domain::{
+    ArbSignal, IngestorCommand, NormalizedOrderbook, StrategyType, TradeAction,
+};
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
@@ -469,6 +471,7 @@ impl EngineActor {
             let consistent_size_shares = arbos_core::constants::TARGET_LIQUIDITY / highest_price;
 
             let signal = ArbSignal {
+                strategy: StrategyType::Implication,
                 legs: vec![
                     TradeAction::Sell {
                         asset_id: parent_id,
@@ -598,6 +601,7 @@ impl EngineActor {
             }
 
             let signal = ArbSignal {
+                strategy: StrategyType::Partition,
                 legs,
                 expected_profit_usdc: profit,
                 timestamp,
@@ -675,6 +679,7 @@ impl EngineActor {
                 let consistent_size_shares = arbos_core::constants::TARGET_LIQUIDITY / sum_bids;
 
                 let signal = ArbSignal {
+                    strategy: StrategyType::Contradiction,
                     legs: vec![
                         TradeAction::Sell {
                             asset_id,
