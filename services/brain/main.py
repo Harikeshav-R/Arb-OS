@@ -113,6 +113,9 @@ async def lifespan(app: FastAPI):
         minutes=15,
         id="auto_discover_job",
         replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
     )
     _scheduler.start()
     logger.info("brain_scheduler_started")
@@ -239,9 +242,11 @@ async def sync_markets(session: AsyncSession = Depends(get_session)):
         stats = await _internal_sync_markets(session)
         logger.bind(**stats).info("markets_synced_via_api")
         return stats
-    except Exception as e:
+    except HTTPException:
+        raise
+    except Exception:
         logger.exception("api_sync_markets_failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/markets", response_model=list[MarketRead])
@@ -339,7 +344,13 @@ async def _internal_scan_markets(session: AsyncSession, limit: int = 20) -> dict
     markets = result.scalars().all()
 
     if len(markets) < 2:
-        return {"analyzed": 0, "errors": 0, "total_markets": len(markets)}
+        return {
+            "message": "Not enough markets to analyze",
+            "analyzed": 0,
+            "errors": 0,
+            "total_markets": len(markets),
+            "skipped": 0,
+        }
 
     compiled_graph = build_analysis_graph(settings, session)
 
@@ -396,8 +407,13 @@ async def _internal_scan_markets(session: AsyncSession, limit: int = 20) -> dict
             except Exception:
                 errors += 1
 
-    return {"analyzed": analyzed, "errors": errors,
-    "total_markets": len(markets), "skipped": skipped}
+    return {
+        "message": f"Analyzed {analyzed} pairs, skipped {skipped}, {errors} errors",
+        "analyzed": analyzed,
+        "errors": errors,
+        "total_markets": len(markets),
+        "skipped": skipped,
+    }
 
 
 @app.post("/scan", response_model=dict, dependencies=[Depends(_verify_admin)])
@@ -415,9 +431,11 @@ async def scan_markets(
         stats = await _internal_scan_markets(session, limit)
         logger.bind(**stats).info("scan_markets_api_complete")
         return stats
-    except Exception as e:
+    except HTTPException:
+        raise
+    except Exception:
         logger.exception("api_scan_markets_failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 async def auto_discover_and_analyze() -> None:
@@ -425,10 +443,7 @@ async def auto_discover_and_analyze() -> None:
     logger.info("background_sync_and_scan_started")
     try:
         # We need a fresh session for the background task.
-        # get_session yields one, so we can use async for or anext
-        session_gen = get_session()
-        session = await anext(session_gen)
-        try:
+        async for session in get_session():
             # 1. Sync markets from API
             sync_stats = await _internal_sync_markets(session)
 
@@ -439,11 +454,7 @@ async def auto_discover_and_analyze() -> None:
                 sync=sync_stats,
                 scan=scan_stats
             ).info("background_sync_and_scan_completed")
-        finally:
-            try:
-                await anext(session_gen)
-            except StopAsyncIteration:
-                pass
+            break
     except Exception:
         logger.exception("background_sync_and_scan_failed")
 
