@@ -19,6 +19,8 @@ from loguru import logger
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
 from config import get_settings
 from database import close_db, get_session, init_db
 from gamma_client import GammaClient
@@ -54,6 +56,7 @@ logger.add(
 
 _graph_manager = RelationshipGraphManager()
 _gamma_client: GammaClient | None = None
+_scheduler = AsyncIOScheduler()
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
@@ -103,10 +106,25 @@ async def lifespan(app: FastAPI):
     async for session in get_session():
         await _graph_manager.load_from_db(session)
 
+    # Background tasks
+    _scheduler.add_job(
+        auto_discover_and_analyze,
+        "interval",
+        minutes=15,
+        id="auto_discover_job",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
+    )
+    _scheduler.start()
+    logger.info("brain_scheduler_started")
+
     logger.info("brain_ready")
     yield
 
     # Shutdown
+    _scheduler.shutdown()
     if _gamma_client:
         await _gamma_client.aclose()
     await close_db()
@@ -149,11 +167,10 @@ async def health(session: AsyncSession = Depends(get_session)):
 # ── Market Sync ───────────────────────────────────────────────────────────────
 
 
-@app.post("/markets/sync", response_model=dict, dependencies=[Depends(_verify_admin)])
-async def sync_markets(session: AsyncSession = Depends(get_session)):
-    """Fetch active markets from the Gamma API and upsert into the local DB."""
+async def _internal_sync_markets(session: AsyncSession) -> dict[str, int]:
+    """Internal sync logic so background jobs can call it directly."""
     if _gamma_client is None:
-        raise HTTPException(status_code=503, detail="Gamma client not initialised")
+        raise RuntimeError("Gamma client not initialised")
 
     settings = get_settings()
     raw_markets = await _gamma_client.fetch_all_active_markets(
@@ -176,7 +193,6 @@ async def sync_markets(session: AsyncSession = Depends(get_session)):
 
         now = datetime.now(UTC)
 
-        # Extract token IDs from the market data
         clob_token_ids: list[str] = []
         tokens = raw.get("tokens") or raw.get("clobTokenIds")
         if isinstance(tokens, list):
@@ -216,12 +232,21 @@ async def sync_markets(session: AsyncSession = Depends(get_session)):
             created += 1
 
     await session.commit()
-    logger.bind(
-        total_fetched=len(raw_markets),
-        created=created,
-        updated=updated,
-    ).info("markets_synced")
     return {"created": created, "updated": updated, "total_fetched": len(raw_markets)}
+
+
+@app.post("/markets/sync", response_model=dict, dependencies=[Depends(_verify_admin)])
+async def sync_markets(session: AsyncSession = Depends(get_session)):
+    """Fetch active markets from the Gamma API and upsert into the local DB."""
+    try:
+        stats = await _internal_sync_markets(session)
+        logger.bind(**stats).info("markets_synced_via_api")
+        return stats
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("api_sync_markets_failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/markets", response_model=list[MarketRead])
@@ -306,19 +331,10 @@ async def analyze_pair(
 # ── Scan ──────────────────────────────────────────────────────────────────────
 
 
-@app.post("/scan", response_model=dict, dependencies=[Depends(_verify_admin)])
-async def scan_markets(
-        limit: int = Query(default=20, le=100, description="Max markets to compare"),
-        session: AsyncSession = Depends(get_session),
-):
-    """Trigger a scan: fetch top markets and analyze unprocessed pairs.
-
-    This is a heavy endpoint — it iterates over C(n,2) pairs and invokes
-    the LLM for each.  Use ``limit`` to control blast radius.
-    """
+async def _internal_scan_markets(session: AsyncSession, limit: int = 20) -> dict[str, int]:
+    """Internal scan logic so background jobs can call it directly."""
     settings = get_settings()
 
-    # Get top markets by volume
     result = await session.execute(
         select(Market)
         .where(Market.active.is_(True), Market.closed.is_(False))
@@ -327,15 +343,15 @@ async def scan_markets(
     )
     markets = result.scalars().all()
 
-    logger.bind(
-        active_markets=len(markets),
-        admin=True,
-    ).info("scan_started")
-
     if len(markets) < 2:
-        return {"analyzed": 0, "message": "Not enough markets to compare. Sync markets first."}
+        return {
+            "message": "Not enough markets to analyze",
+            "analyzed": 0,
+            "errors": 0,
+            "total_markets": len(markets),
+            "skipped": 0,
+        }
 
-    # Pre-compile the graph once per request to avoid O(n^2) overhead
     compiled_graph = build_analysis_graph(settings, session)
 
     analyzed = 0
@@ -344,8 +360,6 @@ async def scan_markets(
 
     for i, market_a in enumerate(markets):
         for market_b in markets[i + 1:]:
-            # Skip already-analyzed pairs (even if inactive right now, unless we want
-            # to re-scan them)
             existing = await session.execute(
                 select(Relationship).where(
                     Relationship.is_active.is_(True),
@@ -363,10 +377,6 @@ async def scan_markets(
                 skipped += 1
                 continue
 
-            logger.bind(
-                a=market_a.condition_id,
-                b=market_b.condition_id,
-            ).info("scan_pair")
             try:
                 state: AnalysisState = {
                     "condition_id_a": market_a.condition_id,
@@ -394,20 +404,59 @@ async def scan_markets(
                     analyzed += 1
                 else:
                     errors += 1
-                    logger.bind(error=graph_result["error"]).warning("scan_pair_error")
             except Exception:
                 errors += 1
-                logger.bind(
-                    a=market_a.condition_id,
-                    b=market_b.condition_id,
-                ).exception("scan_pair_exception")
 
-    logger.bind(
-        analyzed=analyzed,
-        skipped=skipped,
-        errors=errors,
-    ).info("scan_complete")
-    return {"analyzed": analyzed, "errors": errors, "total_markets": len(markets)}
+    return {
+        "message": f"Analyzed {analyzed} pairs, skipped {skipped}, {errors} errors",
+        "analyzed": analyzed,
+        "errors": errors,
+        "total_markets": len(markets),
+        "skipped": skipped,
+    }
+
+
+@app.post("/scan", response_model=dict, dependencies=[Depends(_verify_admin)])
+async def scan_markets(
+        limit: int = Query(default=20, le=100, description="Max markets to compare"),
+        session: AsyncSession = Depends(get_session),
+):
+    """Trigger a scan: fetch top markets and analyze unprocessed pairs.
+
+    This is a heavy endpoint — it iterates over C(n,2) pairs and invokes
+    the LLM for each.  Use ``limit`` to control blast radius.
+    """
+    try:
+        logger.bind(admin=True).info("scan_markets_api_start")
+        stats = await _internal_scan_markets(session, limit)
+        logger.bind(**stats).info("scan_markets_api_complete")
+        return stats
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("api_scan_markets_failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+async def auto_discover_and_analyze() -> None:
+    """Background task to sync latest markets and scan pairs."""
+    logger.info("background_sync_and_scan_started")
+    try:
+        # We need a fresh session for the background task.
+        async for session in get_session():
+            # 1. Sync markets from API
+            sync_stats = await _internal_sync_markets(session)
+
+            # 2. Re-evaluate a small batch of pairs (limit=20 for speed)
+            scan_stats = await _internal_scan_markets(session, limit=20)
+
+            logger.bind(
+                sync=sync_stats,
+                scan=scan_stats
+            ).info("background_sync_and_scan_completed")
+            break
+    except Exception:
+        logger.exception("background_sync_and_scan_failed")
 
 
 # ── Relationships ─────────────────────────────────────────────────────────────

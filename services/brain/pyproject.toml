@@ -16,6 +16,7 @@ dependencies = [
     "httpx>=0.28.0",
     "loguru>=0.7.0",
     "networkx>=3.4",
+    "apscheduler>=3.11.2",
 ]
 
 [project.optional-dependencies]
