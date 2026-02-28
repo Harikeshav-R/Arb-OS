@@ -68,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
         broadcast_tx: broadcast_tx.clone(),
         start_time,
         mode: config.execution_mode,
+        ingestor_cmd_tx: ingestor_cmd_tx.clone(),
     };
 
     let ws_port = config.ws_port;

@@ -1,11 +1,12 @@
 use crate::ledger::Ledger;
+use arbos_core::domain::IngestorCommand;
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::response::{IntoResponse, Json};
-use axum::routing::get;
+use axum::routing::{get, post};
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info, warn};
 
@@ -16,6 +17,7 @@ pub struct AppState {
     pub broadcast_tx: broadcast::Sender<String>,
     pub start_time: std::time::Instant,
     pub mode: arbos_core::domain::ExecutionMode,
+    pub ingestor_cmd_tx: mpsc::Sender<IngestorCommand>,
 }
 
 /// Start the Axum HTTP + WebSocket server on the given port.
@@ -24,6 +26,7 @@ pub async fn start_server(state: AppState, port: u16) -> anyhow::Result<()> {
         .route("/ws", get(ws_handler))
         .route("/api/health", get(health_handler))
         .route("/api/status", get(status_handler))
+        .route("/api/assets/add", post(add_assets_handler))
         .layer(
             std::env::var("VITE_ALLOWED_ORIGINS")
                 .ok()
@@ -142,6 +145,73 @@ async fn status_handler(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// Endpoint to dynamically add assets to the active ingestion stream
+#[derive(serde::Deserialize)]
+pub struct AddAssetsRequest {
+    pub asset_ids: Vec<String>,
+}
+
+async fn add_assets_handler(
+    State(state): State<AppState>,
+    axum::extract::Json(payload): axum::extract::Json<AddAssetsRequest>,
+) -> impl IntoResponse {
+    if payload.asset_ids.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "No asset IDs provided" })),
+        )
+            .into_response();
+    }
+
+    let mut added_count = 0;
+    let mut errors = Vec::new();
+
+    for id_str in payload.asset_ids {
+        match std::str::FromStr::from_str(&id_str) {
+            Ok(u256_id) => {
+                if let Err(e) = state
+                    .ingestor_cmd_tx
+                    .send(IngestorCommand::Subscribe(u256_id))
+                    .await
+                {
+                    error!(asset_id = %u256_id, "Failed to send Subscribe command to Ingestor: {}", e);
+                    errors.push(format!(
+                        "Failed to route asset {}: channel full/closed",
+                        id_str
+                    ));
+                } else {
+                    added_count += 1;
+                    info!(asset_id = %u256_id, "Dynamically instructed Ingestor to subscribe tracking frontend request.");
+                }
+            }
+            Err(e) => {
+                warn!(asset_id = %id_str, "Frontend supplied invalid asset string format: {}", e);
+                errors.push(format!("Invalid U256 string '{}'", id_str));
+            }
+        }
+    }
+
+    if added_count == 0 && !errors.is_empty() {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "message": "Failed to add any requested assets",
+                "errors": errors
+            })),
+        )
+            .into_response()
+    } else {
+        (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({
+                "message": format!("Successfully routed {} assets to Ingestor", added_count),
+                "errors": errors
+            })),
+        )
+            .into_response()
+    }
+}
+
 /// Build the status JSON payload from shared state.
 async fn build_status_json(state: &AppState) -> anyhow::Result<serde_json::Value> {
     // Minimize lock contention by cloning the needed data quickly and dropping the lock
@@ -218,16 +288,19 @@ mod tests {
     use tower::ServiceExt;
 
     fn build_test_router() -> Router {
+        let (cmd_tx, _) = tokio::sync::mpsc::channel(1);
         let state = AppState {
             ledger: Arc::new(RwLock::new(Ledger::new(50))),
             broadcast_tx: broadcast::channel(10).0,
             start_time: std::time::Instant::now(),
             mode: arbos_core::domain::ExecutionMode::Demo,
+            ingestor_cmd_tx: cmd_tx,
         };
 
         Router::new()
             .route("/api/health", get(health_handler))
             .route("/api/status", get(status_handler))
+            .route("/api/assets/add", post(add_assets_handler))
             .with_state(state)
     }
 

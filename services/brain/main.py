@@ -273,6 +273,33 @@ async def list_markets(
     ]
 
 
+@app.get("/markets/{condition_id}")
+async def get_market(
+        condition_id: str,
+        session: AsyncSession = Depends(get_session),
+):
+    """Get details for a specific market, including clob_token_ids."""
+    result = await session.execute(
+        select(Market).where(Market.condition_id == condition_id)
+    )
+    market = result.scalars().first()
+
+    if not market:
+        raise HTTPException(status_code=404, detail="Market not found")
+
+    return {
+        "condition_id": market.condition_id,
+        "question": market.question,
+        "description": market.description,
+        "event_title": market.event_title,
+        "volume": market.volume,
+        "neg_risk": market.neg_risk,
+        "clob_token_ids": market.clob_token_ids,
+        "active": market.active,
+        "closed": market.closed,
+    }
+
+
 # ── Analysis ──────────────────────────────────────────────────────────────────
 
 
