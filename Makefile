@@ -60,7 +60,7 @@ db-shell: ## Open psql inside the postgres container
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 
-test-rust: ## Run Rust tests (engine, ingestor, core)
+test-rust: ## Run Rust tests (bot, engine, ingestor, core)
 	cargo test
 
 test-brain: ## Run Brain Python tests
