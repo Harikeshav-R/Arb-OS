@@ -22,12 +22,12 @@ RUN mkdir -p crates/core/src crates/ingestor/src crates/engine/src crates/bot/sr
     touch crates/core/src/lib.rs crates/engine/src/lib.rs
 
 # Pre-build dependencies (cached unless Cargo.toml/Cargo.lock change)
-RUN cargo build --release -p ingestor 2>/dev/null || true
+RUN cargo build --release -p arbos-ingestor 2>/dev/null || true
 
 # Copy real source and build
 COPY . .
 RUN touch crates/*/src/*.rs && \
-    cargo build --release -p ingestor
+    cargo build --release -p arbos-ingestor
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
@@ -40,7 +40,7 @@ RUN apt-get update && \
 RUN groupadd --gid 1000 ingestor && \
     useradd --uid 1000 --gid ingestor --shell /bin/sh --create-home ingestor
 
-COPY --from=builder /usr/src/app/target/release/ingestor /usr/local/bin/ingestor
+COPY --from=builder /usr/src/app/target/release/arbos-ingestor /usr/local/bin/ingestor
 
 USER ingestor
 
