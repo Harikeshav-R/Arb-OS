@@ -24,7 +24,16 @@ pub async fn start_server(state: AppState, port: u16) -> anyhow::Result<()> {
         .route("/ws", get(ws_handler))
         .route("/api/health", get(health_handler))
         .route("/api/status", get(status_handler))
-        .layer(CorsLayer::permissive())
+        .layer(
+            std::env::var("VITE_ALLOWED_ORIGINS")
+                .map(|origin| {
+                    CorsLayer::new()
+                        .allow_origin(origin.parse::<axum::http::HeaderValue>().unwrap())
+                        .allow_methods(tower_http::cors::Any)
+                        .allow_headers(tower_http::cors::Any)
+                })
+                .unwrap_or_else(|_| CorsLayer::permissive()), // Use permissive if unspecified, but can be locked down
+        )
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");
@@ -118,7 +127,7 @@ async fn build_status_json(state: &AppState) -> anyhow::Result<serde_json::Value
         .map(|p| {
             serde_json::json!({
                 "asset_id": p.asset_id.to_string(),
-                "side": p.side,
+                "side": p.side.as_str(),
                 "size": p.size.to_string(),
                 "entry_price": p.entry_price.to_string(),
                 "opened_at": p.opened_at,
@@ -139,7 +148,7 @@ async fn build_status_json(state: &AppState) -> anyhow::Result<serde_json::Value
                 "fill_details": r.fill_details.iter().map(|f| {
                     serde_json::json!({
                         "asset_id": f.asset_id.to_string(),
-                        "side": f.side,
+                        "side": f.side.as_str(),
                         "size": f.size.to_string(),
                         "price": f.price.to_string(),
                         "filled": f.filled,
